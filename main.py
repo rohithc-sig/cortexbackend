@@ -5,6 +5,7 @@ import snowflake.connector
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
 # ----------------------------------------------------------
 # Load Environment Variables
@@ -14,6 +15,13 @@ load_dotenv()
 
 app = FastAPI(title="Cortex Backend")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ----------------------------------------------------------
 # Request Models
