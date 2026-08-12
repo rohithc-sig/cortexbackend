@@ -3,21 +3,10 @@ import requests
 import snowflake.connector
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-import os
-import requests
-import snowflake.connector
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 
-# ----------------------------------------------------------
-# Load Environment Variables
-# ----------------------------------------------------------
-load_dotenv()
-
-app = FastAPI(title="Cortex Backend")
 # ----------------------------------------------------------
 # Load Environment Variables
 # ----------------------------------------------------------
@@ -37,30 +26,10 @@ app.add_middleware(
 # ----------------------------------------------------------
 # Request Models
 # ----------------------------------------------------------
-# ----------------------------------------------------------
-# Request Models
-# ----------------------------------------------------------
 class ChatRequest(BaseModel):
     question: str
     pbi_context: Optional[Dict[str, Any]] = None
 
-# ----------------------------------------------------------
-# Snowflake Connection Utility
-# ----------------------------------------------------------
-def get_connection():
-    return snowflake.connector.connect(
-        account=os.getenv("SNOWFLAKE_ACCOUNT"),
-        user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
-        role=os.getenv("SNOWFLAKE_ROLE"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-        database=os.getenv("SNOWFLAKE_DATABASE"),
-        schema=os.getenv("SNOWFLAKE_SCHEMA"),
-    )
-
-# ----------------------------------------------------------
-# Health Check & Test Endpoints
-# ----------------------------------------------------------
 # ----------------------------------------------------------
 # Snowflake Connection Utility
 # ----------------------------------------------------------
@@ -101,28 +70,7 @@ def test_connection():
     finally:
         if 'cursor' in locals(): cursor.close()
         if 'conn' in locals(): conn.close()
-        "status": "Running",
-        "service": "Snowflake Cortex Backend"
-    }
 
-@app.get("/test-connection")
-def test_connection():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT CURRENT_VERSION()")
-        version = cursor.fetchone()[0]
-        return {
-            "status": "Connected",
-            "snowflake_version": version
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if 'cursor' in locals(): cursor.close()
-        if 'conn' in locals(): conn.close()
-
-# Explicit preflight handler to prevent CORS errors on OPTIONS requests
 # Explicit preflight handler to prevent CORS errors on OPTIONS requests
 @app.options("/chat")
 def options_chat():
@@ -131,12 +79,8 @@ def options_chat():
 # ----------------------------------------------------------
 # Live Cortex Chat Endpoint
 # ----------------------------------------------------------
-# ----------------------------------------------------------
-# Live Cortex Chat Endpoint
-# ----------------------------------------------------------
 @app.post("/chat")
 def chat(request: ChatRequest):
-    # 1. Append Power BI context/slicers if available
     # 1. Append Power BI context/slicers if available
     user_query = request.question
     if request.pbi_context and request.pbi_context.get("categories"):
@@ -145,8 +89,6 @@ def chat(request: ChatRequest):
             col = cat.get("columnName") or cat.get("column")
             vals = cat.get("values") or cat.get("activeValues", [])
             if col and vals:
-                formatted_vals = ", ".join([f"'{v}'" for v in vals])
-                filters.append(f"{col} IN ({formatted_vals})")
                 formatted_vals = ", ".join([f"'{v}'" for v in vals])
                 filters.append(f"{col} IN ({formatted_vals})")
         if filters:
@@ -238,18 +180,8 @@ def chat(request: ChatRequest):
     return {
         "answer": answer_text.strip(),
         "sql": generated_sql,
-        "answer": answer_text.strip(),
-        "sql": generated_sql,
         "columns": columns,
         "rows": rows,
         "request_id": data.get("request_id"),
         "warnings": data.get("warnings", [])
     }
-
-
-
-
-
-
-
-
