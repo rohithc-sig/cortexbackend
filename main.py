@@ -105,19 +105,22 @@ def chat(request: ChatRequest):
     url = f"{host_url}/api/v2/cortex/analyst/message"
 
     payload = {
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": user_query
-                    }
-                ]
-            }
-        ],
-        "semantic_model_file": os.getenv("SNOWFLAKE_SEMANTIC_MODEL","CPG.PUBLIC.SALES_SEMANTIC")
-    }
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": user_query
+                }
+            ]
+        }
+    ],
+    "semantic_view": os.getenv(
+        "SNOWFLAKE_SEMANTIC_VIEW",
+        "CPG.PUBLIC.SALES_SEMANTIC"
+    )
+}
 
     headers = {
         "Authorization": f"Bearer {os.getenv('SNOWFLAKE_PAT')}",
