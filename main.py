@@ -88,6 +88,9 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     question: str
     pbi_context: Optional[Dict[str, Any]] = None
+    user_email: Optional[str] = None
+    user_region: Optional[str] = None
+    user_identity: Optional[Dict[str, Any]] = None
 
 
 # ----------------------------------------------------------
@@ -478,6 +481,13 @@ def chat(request: ChatRequest):
 
     user_query = request.question
 
+    # Temporary POC: Power BI evaluated this region under dataset RLS.
+    if request.user_region:
+        safe_region = request.user_region.replace("'", "''")
+        user_query += (
+            f" (User region filter: REGION = '{safe_region}')"
+        )
+
 
     if (
         request.pbi_context
@@ -612,7 +622,10 @@ def chat(request: ChatRequest):
 
             "SNOWFLAKE_SEMANTIC_VIEW",
 
-            "CPG.PUBLIC.SALES_SEMANTIC"
+            os.getenv(
+                "SEMANTIC_VIEW",
+                "CPG.PUBLIC.SALES_SEMANTIC"
+            )
 
         )
 
@@ -1056,6 +1069,9 @@ def chat(request: ChatRequest):
             data.get(
                 "request_id"
             ),
+
+        "user_identity":
+            request.user_identity,
 
         "warnings":
             data.get(

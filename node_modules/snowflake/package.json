@@ -1,0 +1,11 @@
+{
+  "name": "snowflake",
+  "version": "0.0.0",
+  "description": "",
+  "type": "module",
+  "private": false,
+  "author": "Mayank Verma",
+  "license": "MIT",
+  "main": "index.js",
+  "keywords": []
+}
