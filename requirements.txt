@@ -3,4 +3,3 @@ uvicorn
 snowflake-connector-python
 python-dotenv
 requests
-google-genai
