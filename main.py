@@ -110,7 +110,7 @@ def get_connection():
         ),
 
         password=os.getenv(
-            "SNOWFLAKE_PASSWORD"
+            "SNOWFLAKE_PAT"
         ),
 
         role=os.getenv(
@@ -129,6 +129,8 @@ def get_connection():
             "SNOWFLAKE_SCHEMA"
         ),
     )
+
+    
 
 
 # ==========================================================
@@ -591,6 +593,43 @@ def chat(request: ChatRequest):
     )
 
 
+    # ======================================================
+    # UPDATED: NATIVE SNOWFLAKE SEMANTIC VIEW
+    # ======================================================
+    #
+    # The backend now uses a native Snowflake Semantic View.
+    #
+    # Example .env:
+    #
+    # SNOWFLAKE_SEMANTIC_VIEW=MY_DB.MY_SCHEMA.MY_SEMANTIC_VIEW
+    #
+    # Unlike a staged YAML semantic model, a native Semantic
+    # View must be passed using the "semantic_view" property
+    # in the Cortex Analyst REST API payload.
+    #
+    # ======================================================
+
+    semantic_view = os.getenv(
+        "SNOWFLAKE_SEMANTIC_VIEW"
+    )
+
+
+    if not semantic_view:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=(
+                "Snowflake semantic view is not configured. "
+                "Set SNOWFLAKE_SEMANTIC_VIEW to a fully qualified "
+                "semantic view name like "
+                "'DB.SCHEMA.SEMANTIC_VIEW'."
+            )
+
+        )
+
+
     payload = {
 
         "messages": [
@@ -618,16 +657,8 @@ def chat(request: ChatRequest):
 
         ],
 
-        "semantic_view": os.getenv(
-
-            "SNOWFLAKE_SEMANTIC_VIEW",
-
-            os.getenv(
-                "SEMANTIC_VIEW",
-                "CPG.PUBLIC.SALES_SEMANTIC"
-            )
-
-        )
+        "semantic_view":
+            semantic_view
 
     }
 
@@ -809,14 +840,14 @@ def chat(request: ChatRequest):
             cursor = conn.cursor()
 
 
+            # ------------------------------------------------
+            # Extract column headers
+            # ------------------------------------------------
+
             cursor.execute(
                 generated_sql
             )
 
-
-            # ------------------------------------------------
-            # Extract column headers
-            # ------------------------------------------------
 
             if cursor.description:
 
