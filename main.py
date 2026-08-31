@@ -1,4 +1,3 @@
-
 import os
 import json
 import requests
@@ -100,7 +99,7 @@ def get_connection():
 
 
 # ==========================================================
-# >>> UPDATED: SQL SAFETY / EXECUTION SETTINGS
+# SQL SAFETY / EXECUTION SETTINGS
 # ==========================================================
 
 MAX_RESULT_ROWS = 500
@@ -115,17 +114,12 @@ def enforce_sql_limit(sql_text: str) -> str:
 
     The original Cortex Analyst SQL is wrapped as a subquery so
     the backend controls the maximum number of rows returned.
-
-    This is intentionally enforced in the backend rather than
-    relying only on an AI/custom instruction.
     """
 
     if not sql_text:
 
         return sql_text
 
-
-    # Remove trailing whitespace and semicolon.
 
     cleaned_sql = sql_text.strip().rstrip(";").strip()
 
@@ -164,11 +158,6 @@ def configure_statement_timeout(cursor):
         f"{STATEMENT_TIMEOUT_SECONDS}"
 
     )
-
-
-# ==========================================================
-# END UPDATED SQL SAFETY / EXECUTION SETTINGS
-# ==========================================================
 
 
 # ==========================================================
@@ -237,10 +226,6 @@ Return a concise answer and exactly three useful follow-up questions.
 
 
     try:
-
-        # --------------------------------------------------
-        # AI_COMPLETE
-        # --------------------------------------------------
 
         sql = """
 
@@ -339,20 +324,12 @@ Return a concise answer and exactly three useful follow-up questions.
         print(result)
 
 
-        # --------------------------------------------------
-        # Validate response
-        # --------------------------------------------------
-
         if result is None:
 
             raise ValueError(
                 "AI_COMPLETE returned NULL"
             )
 
-
-        # --------------------------------------------------
-        # Parse structured response
-        # --------------------------------------------------
 
         if isinstance(
             result,
@@ -379,46 +356,25 @@ Return a concise answer and exactly three useful follow-up questions.
             )
 
 
-        # --------------------------------------------------
-        # Extract answer
-        # --------------------------------------------------
-
         answer = result.get(
-
             "answer",
-
             ""
-
         )
 
 
-        # --------------------------------------------------
-        # Extract follow-up questions
-        # --------------------------------------------------
-
         follow_up_questions = result.get(
-
             "follow_up_questions",
-
             []
-
         )
 
 
         if not isinstance(
-
             follow_up_questions,
-
             list
-
         ):
 
             follow_up_questions = []
 
-
-        # --------------------------------------------------
-        # Maximum 3 questions
-        # --------------------------------------------------
 
         follow_up_questions = [
 
@@ -435,11 +391,9 @@ Return a concise answer and exactly three useful follow-up questions.
         return {
 
             "answer":
-
                 answer,
 
             "follow_up_questions":
-
                 follow_up_questions
 
         }
@@ -448,6 +402,383 @@ Return a concise answer and exactly three useful follow-up questions.
     finally:
 
         cursor.close()
+
+
+# ==========================================================
+# >>> RCA AUTO-FLOW
+# ==========================================================
+#
+# These functions are used automatically from /chat.
+#
+# Flow:
+#
+# User question
+#      ↓
+# Detect diagnostic intent
+#      ↓
+# Check SQL evidence
+#      ↓
+# Sufficient?
+#      ↓
+# RCA AI_COMPLETE
+#
+# ==========================================================
+
+
+def is_diagnostic_question(
+    user_question: str
+) -> bool:
+
+    """
+    Lightweight deterministic check for RCA-style questions.
+
+    This avoids running the expensive RCA AI_COMPLETE call for
+    ordinary analytical questions.
+
+    The check is intentionally broad enough to catch common
+    business diagnostic wording.
+    """
+
+    if not user_question:
+
+        return False
+
+
+    question = user_question.lower().strip()
+
+
+    diagnostic_patterns = [
+
+        "why",
+
+        "root cause",
+
+        "reason for",
+
+        "reason behind",
+
+        "what caused",
+
+        "what is causing",
+
+        "driver",
+
+        "drivers",
+
+        "decline",
+
+        "decrease",
+
+        "drop",
+
+        "dropped",
+
+        "fall",
+
+        "fell",
+
+        "increase",
+
+        "increased",
+
+        "grew",
+
+        "growth",
+
+        "spike",
+
+        "spiked",
+
+        "change",
+
+        "changed",
+
+        "underperform",
+
+        "underperformed",
+
+        "underperformance",
+
+        "overperform",
+
+        "overperformed",
+
+        "variance",
+
+        "anomaly",
+
+        "anomalies",
+
+        "explain",
+
+        "explanation",
+
+        "investigate",
+
+        "investigation",
+
+        "diagnose",
+
+        "diagnostic",
+
+        "cause",
+
+        "causes"
+
+    ]
+
+
+    return any(
+
+        pattern in question
+
+        for pattern
+        in diagnostic_patterns
+
+    )
+
+
+def check_rca_evidence(
+    columns: list,
+    rows: list
+) -> Dict[str, Any]:
+
+    """
+    Determine whether the SQL result contains enough evidence
+    for a meaningful RCA.
+
+    This is deliberately deterministic.
+
+    We do not ask AI_COMPLETE to decide whether evidence exists.
+
+    Minimum requirements:
+
+    - At least 2 rows
+    - At least 2 columns
+
+    Additional signals are detected for time/dimension/value
+    based analysis.
+    """
+
+    if not rows:
+
+        return {
+
+            "sufficient": False,
+
+            "reason":
+                "The query returned no rows.",
+
+            "row_count":
+                0,
+
+            "column_count":
+                len(columns or [])
+
+        }
+
+
+    if len(rows) < 2:
+
+        return {
+
+            "sufficient": False,
+
+            "reason":
+                "The query returned fewer than two rows.",
+
+            "row_count":
+                len(rows),
+
+            "column_count":
+                len(columns or [])
+
+        }
+
+
+    if len(columns or []) < 2:
+
+        return {
+
+            "sufficient": False,
+
+            "reason":
+                "The query does not contain enough dimensions or metrics.",
+
+            "row_count":
+                len(rows),
+
+            "column_count":
+                len(columns or [])
+
+        }
+
+
+    lower_columns = [
+
+        str(column).lower()
+
+        for column
+        in columns
+
+    ]
+
+
+    time_keywords = [
+
+        "date",
+        "year",
+        "month",
+        "quarter",
+        "week",
+        "day",
+        "period",
+        "time"
+
+    ]
+
+
+    metric_keywords = [
+
+        "sales",
+        "revenue",
+        "profit",
+        "quantity",
+        "units",
+        "margin",
+        "amount",
+        "cost",
+        "price",
+        "value",
+        "count",
+        "volume"
+
+    ]
+
+
+    dimension_keywords = [
+
+        "region",
+        "country",
+        "state",
+        "city",
+        "store",
+        "product",
+        "category",
+        "subcategory",
+        "brand",
+        "customer",
+        "segment",
+        "department",
+        "channel"
+
+    ]
+
+
+    has_time = any(
+
+        any(
+            keyword in column
+            for keyword in time_keywords
+        )
+
+        for column
+        in lower_columns
+
+    )
+
+
+    has_metric = any(
+
+        any(
+            keyword in column
+            for keyword in metric_keywords
+        )
+
+        for column
+        in lower_columns
+
+    )
+
+
+    has_dimension = any(
+
+        any(
+            keyword in column
+            for keyword in dimension_keywords
+        )
+
+        for column
+        in lower_columns
+
+    )
+
+
+    # A result containing multiple rows and some meaningful
+    # dimensional/metric information is considered sufficient.
+
+    sufficient = (
+
+        len(rows) >= 2
+
+        and
+
+        (
+
+            has_metric
+
+            or
+
+            has_dimension
+
+            or
+
+            has_time
+
+        )
+
+    )
+
+
+    if sufficient:
+
+        reason = (
+            "The result contains multiple rows and "
+            "analytical dimensions or metrics."
+        )
+
+    else:
+
+        reason = (
+            "The result does not contain enough "
+            "analytical evidence for RCA."
+        )
+
+
+    return {
+
+        "sufficient":
+            sufficient,
+
+        "reason":
+            reason,
+
+        "row_count":
+            len(rows),
+
+        "column_count":
+            len(columns or []),
+
+        "has_time":
+            has_time,
+
+        "has_metric":
+            has_metric,
+
+        "has_dimension":
+            has_dimension
+
+    }
 
 
 # ==========================================================
@@ -462,10 +793,6 @@ def generate_rca_ai_response(
     columns: list,
     rows: list
 ):
-
-    # ------------------------------------------------------
-    # RCA MODEL
-    # ------------------------------------------------------
 
     model = os.getenv(
         "SNOWFLAKE_RCA_AI_MODEL",
@@ -491,10 +818,6 @@ def generate_rca_ai_response(
 
     # ------------------------------------------------------
     # Limit evidence sent to AI_COMPLETE
-    #
-    # The SQL itself has already been generated and executed
-    # by Cortex Analyst. We reuse those results rather than
-    # running another Cortex Analyst request.
     # ------------------------------------------------------
 
     max_rows = 500
@@ -609,10 +932,6 @@ Keep the response concise and business-friendly.
 
 
     try:
-
-        # --------------------------------------------------
-        # AI_COMPLETE
-        # --------------------------------------------------
 
         sql = """
 
@@ -845,16 +1164,13 @@ Keep the response concise and business-friendly.
             "RCA AI_COMPLETE returned successfully."
         )
 
+
         print(
             "RCA AI_COMPLETE raw result:"
         )
 
         print(result)
 
-
-        # --------------------------------------------------
-        # Validate response
-        # --------------------------------------------------
 
         if result is None:
 
@@ -887,10 +1203,6 @@ Keep the response concise and business-friendly.
 
             )
 
-
-        # --------------------------------------------------
-        # Normalize response
-        # --------------------------------------------------
 
         summary = result.get(
             "summary",
@@ -1092,15 +1404,13 @@ def chat(request: ChatRequest):
     # EXISTING CORTEX ANALYST LOGIC
     # ======================================================
 
-
-    # ------------------------------------------------------
-    # 1. Append Power BI context/slicers if available
-    # ------------------------------------------------------
-
     user_query = request.question
 
 
-    # Temporary POC: Power BI evaluated this region under dataset RLS.
+    # ------------------------------------------------------
+    # Temporary POC: Power BI evaluated this region under
+    # dataset RLS.
+    # ------------------------------------------------------
 
     if request.user_region:
 
@@ -1207,9 +1517,6 @@ def chat(request: ChatRequest):
     )
 
 
-    # Clean host URL if user provides account identifier
-    # or full host.
-
     if "snowflakecomputing.com" in account:
 
         host_url = (
@@ -1238,7 +1545,7 @@ def chat(request: ChatRequest):
 
 
     # ======================================================
-    # UPDATED: NATIVE SNOWFLAKE SEMANTIC VIEW
+    # NATIVE SNOWFLAKE SEMANTIC VIEW
     # ======================================================
 
     semantic_view = os.getenv(
@@ -1432,7 +1739,7 @@ def chat(request: ChatRequest):
 
 
     # ======================================================
-    # >>> UPDATED: MANDATORY 500-ROW SQL ENFORCEMENT
+    # 4. MANDATORY 500-ROW SQL ENFORCEMENT
     # ======================================================
 
     if generated_sql:
@@ -1467,30 +1774,16 @@ def chat(request: ChatRequest):
             generated_sql
         )
 
-    # ======================================================
-    # END UPDATED 500-ROW SQL ENFORCEMENT
-    # ======================================================
-
 
     # ------------------------------------------------------
-    # 4. Execute Generated SQL
+    # 5. Execute Generated SQL
     # ------------------------------------------------------
 
     columns = []
 
     rows = []
 
-
-    # ======================================================
-    # TABLE SCHEMA FOR AI_COMPLETE
-    # ======================================================
-
     table_schema = []
-
-
-    # ======================================================
-    # END TABLE SCHEMA FOR AI_COMPLETE
-    # ======================================================
 
 
     if generated_sql:
@@ -1502,13 +1795,10 @@ def chat(request: ChatRequest):
             cursor = conn.cursor()
 
 
-            # ==================================================
-            # >>> UPDATED: 60-SECOND SNOWFLAKE STATEMENT TIMEOUT
-            # ==================================================
-
             configure_statement_timeout(
                 cursor
             )
+
 
             print("========================================")
             print("SNOWFLAKE STATEMENT TIMEOUT")
@@ -1519,14 +1809,6 @@ def chat(request: ChatRequest):
                 f"{STATEMENT_TIMEOUT_SECONDS} seconds"
             )
 
-            # ==================================================
-            # END UPDATED STATEMENT TIMEOUT
-            # ==================================================
-
-
-            # ------------------------------------------------
-            # Extract column headers
-            # ------------------------------------------------
 
             cursor.execute(
                 generated_sql
@@ -1544,10 +1826,6 @@ def chat(request: ChatRequest):
 
                 ]
 
-
-                # ------------------------------------------------
-                # Extract table schema
-                # ------------------------------------------------
 
                 for desc in cursor.description:
 
@@ -1579,10 +1857,6 @@ def chat(request: ChatRequest):
 
                     )
 
-
-                # ------------------------------------------------
-                # Fetch rows
-                # ------------------------------------------------
 
                 raw_rows = (
                     cursor.fetchall()
@@ -1639,7 +1913,7 @@ def chat(request: ChatRequest):
 
 
     # ======================================================
-    # SNOWFLAKE AI_COMPLETE RESPONSE GENERATION
+    # 6. NORMAL AI_COMPLETE RESPONSE
     # ======================================================
 
     ai_answer = answer_text.strip()
@@ -1691,9 +1965,6 @@ def chat(request: ChatRequest):
 
         )
 
-
-        # Safety check:
-        # maximum 3 questions.
 
         follow_up_questions = (
 
@@ -1756,12 +2027,168 @@ def chat(request: ChatRequest):
 
 
     # ======================================================
-    # END SNOWFLAKE AI_COMPLETE RESPONSE GENERATION
+    # 7. RCA AUTO-FLOW
     # ======================================================
+    #
+    # This is the new part.
+    #
+    # We only execute RCA for diagnostic questions.
+    #
+    # Normal questions do NOT incur the RCA AI_COMPLETE call.
+    #
+    # ======================================================
+
+    diagnostic = is_diagnostic_question(
+        request.question
+    )
+
+
+    rca_result = None
+
+    rca_evidence = {
+
+        "sufficient":
+            False,
+
+        "reason":
+            "RCA was not requested."
+
+    }
+
+
+    print("========================================")
+    print("RCA AUTO-FLOW")
+    print("========================================")
+
+    print(
+        f"Diagnostic question: {diagnostic}"
+    )
+
+
+    if diagnostic:
+
+        # --------------------------------------------------
+        # Check evidence
+        # --------------------------------------------------
+
+        rca_evidence = check_rca_evidence(
+
+            columns=columns,
+
+            rows=rows
+
+        )
+
+
+        print(
+            f"RCA evidence sufficient: "
+            f"{rca_evidence.get('sufficient')}"
+        )
+
+        print(
+            f"RCA evidence reason: "
+            f"{rca_evidence.get('reason')}"
+        )
+
+
+        # --------------------------------------------------
+        # Evidence is sufficient
+        # --------------------------------------------------
+
+        if rca_evidence.get(
+            "sufficient"
+        ):
+
+            try:
+
+                rca_conn = get_connection()
+
+                try:
+
+                    rca_result = generate_rca_ai_response(
+
+                        conn=rca_conn,
+
+                        user_question=request.question,
+
+                        user_region=request.user_region,
+
+                        sql_text=generated_sql,
+
+                        columns=columns,
+
+                        rows=rows
+
+                    )
+
+                finally:
+
+                    rca_conn.close()
+
+
+                print(
+                    "RCA completed automatically."
+                )
+
+
+            except Exception as rca_err:
+
+                print(
+                    "========================================"
+                )
+
+                print(
+                    "AUTOMATIC RCA FAILED"
+                )
+
+                print(
+                    "========================================"
+                )
+
+                print(
+                    f"Error type: "
+                    f"{type(rca_err).__name__}"
+                )
+
+                print(
+                    f"Error message: "
+                    f"{str(rca_err)}"
+                )
+
+                import traceback
+
+                traceback.print_exc()
+
+                print(
+                    "========================================"
+                )
+
+                # --------------------------------------------------
+                # Important:
+                #
+                # RCA failure should NOT fail the user's normal
+                # analytical response.
+                # --------------------------------------------------
+
+                rca_result = None
+
+
+        else:
+
+            print(
+                "RCA skipped because evidence is insufficient."
+            )
+
+
+    else:
+
+        print(
+            "RCA skipped because question is not diagnostic."
+        )
 
 
     # ======================================================
-    # FINAL RESPONSE TO POWER BI
+    # 8. FINAL RESPONSE TO POWER BI
     # ======================================================
 
     return {
@@ -1793,13 +2220,32 @@ def chat(request: ChatRequest):
             data.get(
                 "warnings",
                 []
-            )
+            ),
+
+        # ==================================================
+        # RCA AUTO-FLOW RESPONSE
+        # ==================================================
+
+        "diagnostic":
+            diagnostic,
+
+        "rca_evidence":
+            rca_evidence,
+
+        "rca":
+            rca_result
 
     }
 
 
 # ==========================================================
 # ROOT CAUSE ANALYSIS ENDPOINT
+# ==========================================================
+#
+# Kept for backward compatibility.
+#
+# The new automatic flow does NOT need to call this endpoint.
+#
 # ==========================================================
 
 @app.post("/rca")
@@ -1850,47 +2296,61 @@ def rca(request: RCARequest):
 
 
     # ------------------------------------------------------
-    # SECURITY REGION VALIDATION
-    #
-    # Keep user_region explicitly present in the RCA flow.
-    #
-    # The original Cortex Analyst SQL already contains the
-    # authorized region filter in the normal flow.
-    #
-    # We do not append another region predicate to the SQL
-    # because that would duplicate work.
+    # Evidence validation
     # ------------------------------------------------------
 
-    if request.user_region:
+    evidence = check_rca_evidence(
 
-        safe_region = request.user_region.replace(
-            "'",
-            "''"
-        )
+        columns=columns,
 
-        print(
-            f"RCA authorized region: {safe_region}"
-        )
+        rows=rows
 
-    else:
-
-        print(
-            "RCA user_region was not supplied."
-        )
+    )
 
 
-    # ------------------------------------------------------
-    # Validate SQL presence
-    # ------------------------------------------------------
+    if not evidence.get(
+        "sufficient"
+    ):
+
+        return {
+
+            "type":
+                "root_cause_analysis",
+
+            "question":
+                request.question,
+
+            "user_region":
+                request.user_region,
+
+            "status":
+                "insufficient_evidence",
+
+            "summary":
+                "There is not enough evidence in the query result "
+                "to perform a meaningful root cause analysis.",
+
+            "primary_drivers":
+                [],
+
+            "secondary_drivers":
+                [],
+
+            "recommendations":
+                [],
+
+            "confidence_caveats":
+                [
+                    evidence.get(
+                        "reason",
+                        "Insufficient evidence."
+                    )
+                ]
+
+        }
+
 
     sql_text = request.sql or ""
-
-
-    if not sql_text:
-
-        print(
-            "RCA request does not contain generated SQL."
-        )
 
 
     # ------------------------------------------------------
@@ -2036,4 +2496,3 @@ def rca(request: RCARequest):
 
 
     return response
-
