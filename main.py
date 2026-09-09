@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import datetime
@@ -6,11 +7,22 @@ import requests
 import snowflake.connector
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
+from fastapi.responses import FileResponse
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    Form
+)
 
 # ----------------------------------------------------------
 # Load Environment Variables
@@ -2668,117 +2680,508 @@ Return a concise answer and exactly three useful follow-up questions.
 # ==========================================================
 
 
-def is_diagnostic_question(
+DIAGNOSTIC_PATTERN_GROUPS: Dict[str, list] = {
+
+    # "Why did X happen" / driver-seeking questions.
+
+    "root_cause": [
+
+        r"\bwhy\b",
+
+        r"\broot\s*cause",
+
+        r"\breason(s)?\s+(for|behind)\b",
+
+        r"\bwhat\s+(is|was|are|were)\s+causing\b",
+
+        r"\bwhat\s+caused\b",
+
+        r"\bwhat('?s|\s+is)\s+driving\b",
+
+        r"\bdriver(s)?\b",
+
+        r"\bdue\s+to\s+what\b",
+
+        r"\bbecause\s+of\s+what\b",
+
+        r"\bexplain\s+(the|this|why|how)\b",
+
+    ],
+
+    # Trend / magnitude-of-change language.
+
+    "trend_change": [
+
+        r"\bdeclin(e|ed|ing)\b",
+
+        r"\bdecreas(e|ed|ing)\b",
+
+        r"\bdrop(ped|ping)?\b",
+
+        r"\bfell\b",
+
+        r"\bfall(en|ing)?\b",
+
+        r"\bincreas(e|ed|ing)\b",
+
+        r"\bgrew\b",
+
+        r"\bgrowth\b",
+
+        r"\bspik(e|ed|ing)\b",
+
+        r"\bsurg(e|ed|ing)\b",
+
+        r"\bdip(ped|ping)?\b",
+
+        r"\bslump(ed|ing)?\b",
+
+        r"\bplunge(d|ing)?\b",
+
+        r"\bchang(e|ed|ing)\b",
+
+        r"\bfluctuat(e|ed|ing|ion)\b",
+
+        r"\btrend(s|ing)?\b",
+
+        r"\byear[\s-]over[\s-]year\b",
+
+        r"\bmonth[\s-]over[\s-]month\b",
+
+        r"\byoy\b",
+
+        r"\bmom\b",
+
+    ],
+
+    # Unusual / unexpected result language.
+
+    "anomaly": [
+
+        r"\bunusual\b",
+
+        r"\bunexpected\b",
+
+        r"\banomal(y|ies)\b",
+
+        r"\boutlier(s)?\b",
+
+        r"\bnot\s+normal\b",
+
+        r"\bis\s+(this|that|it)\s+normal\b",
+
+        r"\bsomething\s+(wrong|off)\b",
+
+        r"\bstand(s|ing)?\s+out\b",
+
+    ],
+
+    # Comparative / target-deviation language.
+
+    "comparison_deviation": [
+
+        r"\bunderperform",
+
+        r"\boverperform",
+
+        r"\bvs\.?\b",
+
+        r"\bversus\b",
+
+        r"\bcompared?\s+(to|with)\b",
+
+        r"\bcompare\b",
+
+        r"\bmiss(ed)?\s+(the\s+)?(target|forecast|budget|goal|plan)\b",
+
+        r"\bexceed(ed|s)?\s+(the\s+)?(target|forecast|budget|goal|plan)\b",
+
+        r"\babove\s+(target|forecast|budget|plan)\b",
+
+        r"\bbelow\s+(target|forecast|budget|plan)\b",
+
+        r"\bvariance\b",
+
+        r"\bbehind\s+(plan|target|forecast|budget)\b",
+
+        r"\bahead\s+of\s+(plan|target|forecast|budget)\b",
+
+    ],
+
+    # Advisory / prescriptive ("what should we do about it") language.
+
+    "advisory_improvement": [
+
+        r"\bhow\s+(can|do|could|should|might)\s+(we|i|they|you)\b[^.?!]{0,60}"
+        r"\b(improve|increase|boost|reduce|lower|fix|optimi[sz]e|grow|recover|"
+        r"turn\s*around|prevent|avoid|mitigate)\b",
+
+        r"\bhow\s+to\s+(improve|increase|boost|reduce|lower|fix|optimi[sz]e|"
+        r"grow|recover|prevent|avoid|mitigate)\b",
+
+        r"\bwhat\s+(can|should|could)\s+(we|i|they|you)\s+do\b",
+
+        r"\brecommend(ation)?s?\b",
+
+        r"\bsuggest(ion)?s?\b",
+
+        r"\bbest\s+way\s+to\b",
+
+        r"\bhelp\s+(us|me|them)\s+(improve|increase|reduce|understand|fix)\b",
+
+        r"\bopportunit(y|ies)\s+to\s+(improve|increase|reduce|grow)\b",
+
+        r"\bnext\s+steps?\b",
+
+        r"\bwhat\s+action(s)?\b",
+
+    ],
+
+    # Generic diagnostic phrasing that doesn't fit the buckets above.
+
+    "diagnostic_generic": [
+
+        r"\bwhat\s+happened\b",
+
+        r"\bwhat('?s|\s+is)\s+(going\s+on|happening)\b",
+
+        r"\bwhat\s+(is|went)\s+wrong\b",
+
+        r"\bunderperformance\b",
+
+        r"\boverperformance\b",
+
+        r"\binvestigat(e|ion)\b",
+
+        r"\bdiagnos(e|is|tic)\b",
+
+        r"\bcause(s)?\b",
+
+        r"\bimpact\s+of\b",
+
+        r"\bcontribut(e|ed|ing|ion)\b",
+
+        r"\bbreak\s?down\b",
+
+        r"\binsight(s)?\s+(on|into)\b",
+
+    ],
+
+}
+
+
+def classify_question_regex(
     user_question: str
-) -> bool:
+) -> Dict[str, Any]:
 
     """
-    Lightweight deterministic check for RCA-style questions.
+    Deterministic, zero-cost, zero-latency classification pass.
 
-    This avoids running the expensive RCA AI_COMPLETE call for
-    ordinary analytical questions.
+    Checks the question against several grouped families of
+    diagnostic wording (causal, trend, anomaly, comparative,
+    advisory, generic). A question can match more than one
+    family -- e.g. "why did sales drop and how can we improve
+    it" matches both root_cause and advisory_improvement.
 
-    The check is intentionally broad enough to catch common
-    business diagnostic wording.
+    Word-boundary regexes are used instead of plain substring
+    matching so that, e.g., "change" does not spuriously match
+    inside words like "exchange".
     """
 
     if not user_question:
 
-        return False
+        return {
+
+            "is_diagnostic":
+                False,
+
+            "categories":
+                []
+
+        }
 
 
     question = user_question.lower().strip()
 
 
-    diagnostic_patterns = [
-
-        "why",
-
-        "root cause",
-
-        "reason for",
-
-        "reason behind",
-
-        "what caused",
-
-        "what is causing",
-
-        "driver",
-
-        "drivers",
-
-        "decline",
-
-        "decrease",
-
-        "drop",
-
-        "dropped",
-
-        "fall",
-
-        "fell",
-
-        "increase",
-
-        "increased",
-
-        "grew",
-
-        "growth",
-
-        "spike",
-
-        "spiked",
-
-        "change",
-
-        "changed",
-
-        "underperform",
-
-        "underperformed",
-
-        "underperformance",
-
-        "overperform",
-
-        "overperformed",
-
-        "variance",
-
-        "anomaly",
-
-        "anomalies",
-
-        "explain",
-
-        "explanation",
-
-        "investigate",
-
-        "investigation",
-
-        "diagnose",
-
-        "diagnostic",
-
-        "cause",
-
-        "causes"
-
-    ]
+    matched_categories = []
 
 
-    return any(
+    for category, patterns in DIAGNOSTIC_PATTERN_GROUPS.items():
 
-        pattern in question
+        for pattern in patterns:
 
-        for pattern
-        in diagnostic_patterns
+            if re.search(
+                pattern,
+                question
+            ):
+
+                matched_categories.append(
+                    category
+                )
+
+                break
+
+
+    return {
+
+        "is_diagnostic":
+            len(matched_categories) > 0,
+
+        "categories":
+            matched_categories
+
+    }
+
+
+def classify_question_via_llm(
+    conn,
+    user_question: str
+) -> Dict[str, Any]:
+
+    """
+    Fallback classifier, used ONLY when the deterministic regex
+    pass (classify_question_regex) finds no match.
+
+    This exists to catch diagnostic intent phrased in a way no
+    fixed pattern list can fully anticipate (for example: "help
+    me understand what's going on with churn this quarter", or
+    "is this a normal number for October").
+
+    Uses a small model with temperature/top_p pinned to 0 and a
+    strict JSON schema for deterministic, structured output.
+
+    Any failure here fails CLOSED (treated as not diagnostic) --
+    this is a safety-net second pass, not the primary classifier,
+    so a classifier error should never block /chat.
+    """
+
+    model = os.getenv(
+        "SNOWFLAKE_INTENT_CLASSIFIER_MODEL",
+        "llama3.1-8b"
+    )
+
+
+    prompt = f"""
+Classify the following business analytics question.
+
+Question:
+
+{user_question}
+
+Decide whether the user is asking a DIAGNOSTIC question: they want
+to understand WHY something happened, WHAT changed, WHAT is driving
+a metric, WHETHER a result is unusual, HOW a result compares to a
+target/prior period, or HOW to improve, fix, or act on a metric.
+
+A question is NOT diagnostic if it is a plain lookup or display
+request with no causal, comparative, evaluative, or advisory intent
+(for example: "show me total sales by region", "list our top 10
+customers", "what was revenue in March").
+
+Respond with strict JSON only, matching the schema exactly.
+"""
+
+
+    cursor = conn.cursor()
+
+
+    try:
+
+        sql = """
+
+        SELECT AI_COMPLETE(
+
+            %s,
+
+            %s,
+
+            {'temperature': 0, 'top_p': 0},
+
+            {
+
+                'type': 'json',
+
+                'schema': {
+
+                    'type': 'object',
+
+                    'properties': {
+
+                        'is_diagnostic': {
+
+                            'type': 'boolean'
+
+                        },
+
+                        'category': {
+
+                            'type': 'string'
+
+                        }
+
+                    },
+
+                    'required': [
+
+                        'is_diagnostic',
+
+                        'category'
+
+                    ]
+
+                }
+
+            }
+
+        )
+
+        """
+
+
+        cursor.execute(
+
+            sql,
+
+            (
+                model,
+                prompt
+            )
+
+        )
+
+
+        result = cursor.fetchone()[0]
+
+
+        if isinstance(
+            result,
+            str
+        ):
+
+            result = json.loads(
+                result
+            )
+
+
+        if not isinstance(
+            result,
+            dict
+        ):
+
+            raise ValueError(
+                "Unexpected classifier result type"
+            )
+
+
+        is_diagnostic = bool(
+            result.get(
+                "is_diagnostic",
+                False
+            )
+        )
+
+
+        return {
+
+            "is_diagnostic":
+                is_diagnostic,
+
+            "categories":
+                [
+                    str(
+                        result.get(
+                            "category",
+                            "llm_diagnostic"
+                        )
+                    )
+                ] if is_diagnostic else []
+
+        }
+
+
+    except Exception as classify_error:
+
+        print(
+            "QUESTION CLASSIFIER: LLM fallback failed, "
+            f"defaulting to not diagnostic: {classify_error}"
+        )
+
+        return {
+
+            "is_diagnostic":
+                False,
+
+            "categories":
+                []
+
+        }
+
+
+    finally:
+
+        cursor.close()
+
+
+def classify_question(
+    conn,
+    user_question: str
+) -> Dict[str, Any]:
+
+    """
+    Full two-tier diagnostic-intent classifier. Designed to run
+    BEFORE the Cortex Analyst call so that:
+
+      1. We know, ahead of time, whether the question is
+         diagnostic, instead of only discovering this after the
+         SQL has already run.
+
+      2. We can inject an explicit instruction into the text sent
+         to Cortex Analyst asking it to return a dimensional
+         breakdown rather than a single scalar, which gives
+         check_rca_evidence() a much better chance of finding
+         "sufficient" evidence later.
+
+    Tier 1: deterministic regex pass (classify_question_regex) --
+    fast, free, and catches the large majority of diagnostic
+    phrasing across "what happened", "how to improve", "why did
+    X change", comparative, and anomaly-style questions.
+
+    Tier 2: only runs when Tier 1 finds nothing -- a small,
+    cheap AI_COMPLETE call to catch phrasing outside the fixed
+    pattern list. Because Tier 1 already covers most real
+    questions, Tier 2 fires rarely, so the added cost/latency is
+    small in aggregate.
+    """
+
+    regex_result = classify_question_regex(
+        user_question
+    )
+
+
+    if regex_result["is_diagnostic"]:
+
+        regex_result["method"] = "regex"
+
+        return regex_result
+
+
+    llm_result = classify_question_via_llm(
+        conn,
+        user_question
+    )
+
+    llm_result["method"] = (
+
+        "llm_fallback"
+
+        if llm_result["is_diagnostic"]
+
+        else "none"
 
     )
+
+    return llm_result
 
 
 def check_rca_evidence(
@@ -3585,62 +3988,6 @@ def home():
 
 
 # ----------------------------------------------------------
-# Snowflake Connection Test
-# ----------------------------------------------------------
-
-@app.get("/test-connection")
-def test_connection():
-
-    try:
-
-        conn = get_connection()
-
-        cursor = conn.cursor()
-
-
-        cursor.execute(
-            "SELECT CURRENT_VERSION()"
-        )
-
-
-        version = cursor.fetchone()[0]
-
-
-        return {
-
-            "status":
-                "Connected",
-
-            "snowflake_version":
-                version
-
-        }
-
-
-    except Exception as e:
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail=str(e)
-
-        )
-
-
-    finally:
-
-        if "cursor" in locals():
-
-            cursor.close()
-
-
-        if "conn" in locals():
-
-            conn.close()
-
-
-# ----------------------------------------------------------
 # Explicit preflight handler
 # ----------------------------------------------------------
 
@@ -3810,6 +4157,89 @@ def chat(request: ChatRequest):
                 f"{'; '.join(filters)})"
 
             )
+
+
+    # ======================================================
+    # QUESTION INTENT CLASSIFICATION (BEFORE CORTEX ANALYST)
+    # ======================================================
+    #
+    # This runs BEFORE the Cortex Analyst call so we can steer
+    # SQL generation for diagnostic questions instead of only
+    # discovering "not enough evidence" after the fact.
+    #
+    # ======================================================
+
+    classification_conn = None
+
+    try:
+
+        classification_conn = get_connection()
+
+        question_classification = classify_question(
+
+            classification_conn,
+
+            request.question
+
+        )
+
+    finally:
+
+        if classification_conn is not None:
+
+            classification_conn.close()
+
+
+    print("========================================")
+    print("QUESTION INTENT CLASSIFICATION")
+    print("========================================")
+
+    print(
+        f"is_diagnostic: "
+        f"{question_classification.get('is_diagnostic')}"
+    )
+
+    print(
+        f"categories: "
+        f"{question_classification.get('categories')}"
+    )
+
+    print(
+        f"method: "
+        f"{question_classification.get('method')}"
+    )
+
+
+    if question_classification.get(
+        "is_diagnostic"
+    ):
+
+        # --------------------------------------------------
+        # Tell Cortex Analyst, in the question text itself,
+        # that this is a diagnostic question and that it
+        # should favor a dimensional breakdown over a single
+        # aggregated value. This is a per-request nudge that
+        # complements (not replaces) the semantic view's own
+        # AI_SQL_GENERATION instructions -- see the notes at
+        # the bottom of this file for the recommended
+        # semantic view configuration.
+        # --------------------------------------------------
+
+        user_query += (
+
+            " (Analysis mode: DIAGNOSTIC. This question is "
+            "about a change, trend, comparison, anomaly, "
+            "driver, or improvement opportunity. Return the "
+            "result broken down by the most relevant "
+            "dimension(s) -- such as product, region, "
+            "category, channel, or customer segment -- and by "
+            "time period where applicable, instead of a single "
+            "aggregated value, so the result can support root "
+            "cause analysis. Include enough rows to show the "
+            "top contributing values for each relevant "
+            "dimension rather than one summary row.)"
+
+        )
 
 
     # ------------------------------------------------------
@@ -4393,8 +4823,19 @@ def chat(request: ChatRequest):
     #
     # ======================================================
 
-    diagnostic = is_diagnostic_question(
-        request.question
+    diagnostic = question_classification.get(
+        "is_diagnostic",
+        False
+    )
+
+    diagnostic_categories = question_classification.get(
+        "categories",
+        []
+    )
+
+    diagnostic_method = question_classification.get(
+        "method",
+        "regex"
     )
 
     rca_result = None
@@ -4695,6 +5136,12 @@ def chat(request: ChatRequest):
 
         "diagnostic":
             diagnostic,
+
+        "diagnostic_categories":
+            diagnostic_categories,
+
+        "diagnostic_method":
+            diagnostic_method,
 
         "rca_evidence":
             rca_evidence,
@@ -5186,3 +5633,640 @@ def temporary_usage(usage_id: str):
 # ==========================================================
 # TEMPORARY USAGE INSPECTION ENDPOINT - END
 # ==========================================================
+
+# ==========================================================
+# PBIVIZ BUILD ENGINE
+# ==========================================================
+
+PBIVIZ_REPOSITORY_URL = os.getenv(
+    "CORTEXCHAT_REPOSITORY_URL"
+)
+
+GITHUB_TOKEN = os.getenv(
+    "GITHUB_TOKEN"
+)
+
+
+# def clone_cortexchat_repository(
+#     target_dir: str
+# ):
+#     """
+#     Clone the private CortexChat repository into a
+#     temporary build directory.
+#     """
+
+#     if not PBIVIZ_REPOSITORY_URL:
+#         raise RuntimeError(
+#             "CORTEXCHAT_REPOSITORY_URL is not configured."
+#         )
+
+#     if not GITHUB_TOKEN:
+#         raise RuntimeError(
+#             "GITHUB_TOKEN is not configured."
+#         )
+
+#     repository_url = PBIVIZ_REPOSITORY_URL
+
+#     # ------------------------------------------------------
+#     # Inject GitHub token into HTTPS clone URL
+#     # ------------------------------------------------------
+
+#     if repository_url.startswith(
+#         "https://github.com/"
+#     ):
+
+#         clone_url = repository_url.replace(
+#             "https://github.com/",
+#             f"https://x-access-token:{GITHUB_TOKEN}@github.com/"
+#         )
+
+#     else:
+
+#         clone_url = repository_url
+
+#     # ------------------------------------------------------
+#     # Clone
+#     # ------------------------------------------------------
+
+#     result = subprocess.run(
+#         [
+#             "git",
+#             "clone",
+#             "--depth",
+#             "1",
+#             clone_url,
+#             target_dir
+#         ],
+#         capture_output=True,
+#         text=True,
+#         timeout=120
+#     )
+
+#     if result.returncode != 0:
+
+#         # Never expose token in error response
+#         error_text = result.stderr.replace(
+#             GITHUB_TOKEN,
+#             "***"
+#         )
+
+#         raise RuntimeError(
+#             "Failed to clone CortexChat repository: "
+#             + error_text
+#         )
+
+#     return target_dir
+
+def clone_cortexchat_repository(target_dir: str):
+
+    print("STEP 1: Starting git clone")
+
+    if not PBIVIZ_REPOSITORY_URL:
+        raise RuntimeError(
+            "CORTEXCHAT_REPOSITORY_URL is not configured."
+        )
+
+    if not GITHUB_TOKEN:
+        raise RuntimeError(
+            "GITHUB_TOKEN is not configured."
+        )
+
+    repository_url = PBIVIZ_REPOSITORY_URL
+
+    if repository_url.startswith("https://github.com/"):
+
+        clone_url = repository_url.replace(
+            "https://github.com/",
+            f"https://x-access-token:{GITHUB_TOKEN}@github.com/"
+        )
+
+    else:
+        clone_url = repository_url
+
+    print("Repository URL configured:", repository_url)
+    print("Target directory:", target_dir)
+    print("Checking git executable...")
+
+    git_check = subprocess.run(
+        ["git", "--version"],
+        capture_output=True,
+        text=True
+    )
+
+    print("Git check:", git_check.stdout)
+
+    print("Running git clone...")
+
+    result = subprocess.run(
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            clone_url,
+            target_dir
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120
+    )
+
+    print("Git return code:", result.returncode)
+    print("Git stdout:", result.stdout)
+    print("Git stderr:", result.stderr)
+
+    if result.returncode != 0:
+
+        error_text = result.stderr.replace(
+            GITHUB_TOKEN,
+            "***"
+        )
+
+        raise RuntimeError(
+            "Failed to clone CortexChat repository: "
+            + error_text
+        )
+
+    print("STEP 1 COMPLETE: Repository cloned")
+
+    return target_dir
+
+def write_branding_config(
+    build_dir: str,
+    config: dict
+):
+
+    src_dir = os.path.join(
+        build_dir,
+        "src"
+    )
+
+    os.makedirs(
+        src_dir,
+        exist_ok=True
+    )
+
+    config_path = os.path.join(
+        src_dir,
+        "branding.ts"
+    )
+
+    company_name = config.get(
+        "company_name",
+        "Cortex"
+    )
+
+    header_text = config.get(
+        "header_text",
+        "Cortex AI Assistant"
+    )
+
+    primary_color = config.get(
+        "primary_color",
+        "#29B5E8"
+    )
+
+    secondary_color = config.get(
+        "secondary_color",
+        "#123456"
+    )
+
+    semantic_model_stage = config.get(
+        "semantic_model_stage",
+        ""
+    )
+
+    branding_source = f"""
+export const BRANDING = {{
+    companyName: {json.dumps(company_name)},
+    headerText: {json.dumps(header_text)},
+    primaryColor: {json.dumps(primary_color)},
+    secondaryColor: {json.dumps(secondary_color)},
+    semanticModelStage: {json.dumps(semantic_model_stage)}
+}};
+"""
+
+    with open(
+        config_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            branding_source
+        )
+
+    return config_path
+
+async def save_logo(
+    logo: UploadFile,
+    build_dir: str
+):
+
+    if logo is None:
+        return None
+
+    assets_dir = os.path.join(
+        build_dir,
+        "assets"
+    )
+
+    os.makedirs(
+        assets_dir,
+        exist_ok=True
+    )
+
+    extension = Path(
+        logo.filename or ""
+    ).suffix.lower()
+
+    allowed_extensions = {
+        ".png",
+        ".jpg",
+        ".jpeg"
+    }
+
+    if extension not in allowed_extensions:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Logo must be PNG, JPG or JPEG."
+            )
+        )
+
+    logo_path = os.path.join(
+        assets_dir,
+        "logo" + extension
+    )
+
+    content = await logo.read()
+
+    with open(
+        logo_path,
+        "wb"
+    ) as f:
+
+        f.write(content)
+
+    return logo_path
+
+@app.post("/generate-pbiviz")
+async def generate_pbiviz(
+    config: str = Form(...),
+    logo: Optional[UploadFile] = File(None)
+):
+
+    build_root = None
+    response_path = None
+
+    try:
+
+        # ==================================================
+        # 1. Parse configuration
+        # ==================================================
+
+        try:
+
+            cfg = json.loads(
+                config
+            )
+
+        except json.JSONDecodeError:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid branding configuration JSON."
+            )
+
+
+        company_name = cfg.get(
+            "company_name",
+            "custom"
+        )
+
+
+        semantic_model_stage = cfg.get(
+            "semantic_model_stage"
+        )
+
+
+        if not semantic_model_stage:
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "semantic_model_stage is required."
+                )
+            )
+
+
+        # ==================================================
+        # 2. Create isolated temporary build directory
+        # ==================================================
+
+        build_root = tempfile.mkdtemp(
+            prefix="cortexchat_pbiviz_"
+        )
+
+        repository_dir = os.path.join(
+            build_root,
+            "cortexChat"
+        )
+
+
+        print("========================================")
+        print("PBIVIZ BUILD STARTED")
+        print("========================================")
+
+        print(
+            f"Company: {company_name}"
+        )
+
+        print(
+            f"Build directory: {build_root}"
+        )
+
+
+        # ==================================================
+        # 3. Clone private CortexChat repo
+        # ==================================================
+
+        clone_cortexchat_repository(
+            repository_dir
+        )
+
+
+        # ==================================================
+        # 4. Inject branding configuration
+        # ==================================================
+
+        write_branding_config(
+            repository_dir,
+            cfg
+        )
+
+
+        # ==================================================
+        # 5. Save logo
+        # ==================================================
+
+        if logo:
+
+            await save_logo(
+                logo,
+                repository_dir
+            )
+
+
+        # ==================================================
+        # 6. Install dependencies
+        # ==================================================
+
+        print("STEP 3: Starting npm install")
+
+        npm_install = subprocess.run(
+            ["npm.cmd", "install"],
+            cwd=repository_dir,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+
+        print("npm return code:", npm_install.returncode)
+        print("npm stdout:", npm_install.stdout)
+        print("npm stderr:", npm_install.stderr)
+
+        if npm_install.returncode != 0:
+            raise RuntimeError(
+                "npm install failed:\n"
+                + npm_install.stderr
+            )
+
+        print("STEP 3 COMPLETE: npm install successful")
+
+
+        # ==================================================
+        # 7. Build PBIVIZ
+        # ==================================================
+
+        print("STEP 4: Starting pbiviz package")
+
+        pbiviz_build = subprocess.run(
+            ["npx.cmd", "pbiviz", "package"],
+            cwd=repository_dir,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+
+        print("pbiviz return code:", pbiviz_build.returncode)
+        print("pbiviz stdout:", pbiviz_build.stdout)
+        print("pbiviz stderr:", pbiviz_build.stderr)
+
+        if pbiviz_build.returncode != 0:
+            raise RuntimeError(
+                "pbiviz package failed:\n"
+                + pbiviz_build.stderr
+            )
+
+        print("STEP 4 COMPLETE: PBIVIZ generated")
+
+
+        # ==================================================
+        # 8. Locate generated PBIVIZ
+        # ==================================================
+
+        dist_dir = os.path.join(
+            repository_dir,
+            "dist"
+        )
+
+
+        if not os.path.exists(
+            dist_dir
+        ):
+
+            raise RuntimeError(
+                "PBIVIZ build completed but dist directory "
+                "was not found."
+            )
+
+
+        pbiviz_files = [
+
+            filename
+
+            for filename
+            in os.listdir(dist_dir)
+
+            if filename.endswith(
+                ".pbiviz"
+            )
+
+        ]
+
+
+        if not pbiviz_files:
+
+            raise RuntimeError(
+                "PBIVIZ build completed but no .pbiviz "
+                "file was found."
+            )
+
+
+        source_pbiviz = os.path.join(
+
+            dist_dir,
+
+            pbiviz_files[0]
+
+        )
+
+
+        # ==================================================
+        # 9. Create customer-friendly filename
+        # ==================================================
+
+        company_slug = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            company_name
+        ).strip("_")
+
+
+        if not company_slug:
+
+            company_slug = "custom"
+
+
+        final_filename = (
+            f"CortexChat_{company_slug}.pbiviz"
+        )
+
+
+        print(
+            "PBIVIZ successfully generated:"
+        )
+
+        print(
+            source_pbiviz
+        )
+
+
+        print("========================================")
+        print("PBIVIZ BUILD SUCCESSFUL")
+        print("========================================")
+
+        # ==================================================
+        # 10. Save the generated PBIVIZ in a user-visible
+        #     folder so it is easy to find on disk.
+        # ==================================================
+
+        downloads_dir = os.path.join(
+            os.path.expanduser("~"),
+            "Downloads",
+            "CortexPBIViz"
+        )
+
+        os.makedirs(
+            downloads_dir,
+            exist_ok=True
+        )
+
+        response_path = os.path.join(
+            downloads_dir,
+            final_filename
+        )
+
+        shutil.copy2(
+            source_pbiviz,
+            response_path
+        )
+
+        print(
+            "PBIVIZ saved to Downloads: "
+            f"{response_path}"
+        )
+
+        return FileResponse(
+
+            path=response_path,
+
+            filename=final_filename,
+
+            media_type="application/octet-stream"
+
+        )
+
+
+    except HTTPException:
+
+        raise
+
+
+    except Exception as build_error:
+
+        print("========================================")
+        print("PBIVIZ BUILD FAILED")
+        print("========================================")
+
+        print(
+            f"Error type: "
+            f"{type(build_error).__name__}"
+        )
+
+        print(
+            f"Error: "
+            f"{str(build_error)}"
+        )
+
+        print("========================================")
+
+
+        raise HTTPException(
+
+            status_code=500,
+
+            detail={
+                "message":
+                    "Failed to generate PBIVIZ.",
+
+                "error":
+                    str(build_error)
+
+            }
+
+        )
+
+
+    finally:
+
+        # ==================================================
+        # Cleanup temporary build
+        # ==================================================
+
+        if build_root:
+
+            try:
+
+                shutil.rmtree(
+                    build_root,
+                    ignore_errors=True
+                )
+
+                print(
+                    "Temporary PBIVIZ build directory "
+                    "cleaned up."
+                )
+
+            except Exception as cleanup_error:
+
+                print(
+                    "PBIVIZ cleanup failed: "
+                    f"{cleanup_error}"
+                )
+
+        # The generated PBIVIZ is intentionally kept in the Downloads
+        # folder so it remains accessible to the user.
+        pass
