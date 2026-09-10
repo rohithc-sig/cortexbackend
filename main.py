@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from fastapi.responses import FileResponse
@@ -23,7 +24,8 @@ from fastapi import (
     HTTPException,
     UploadFile,
     File,
-    Form
+    Form,
+    BackgroundTasks
 )
 
 # ----------------------------------------------------------
@@ -6047,26 +6049,15 @@ export const BRANDING = {{
 # Save uploaded logo
 # ==========================================================
 
-async def save_logo(
-    logo: UploadFile,
-    build_dir: str
-):
-
-    if logo is None:
-        return None
-
-    assets_dir = os.path.join(
-        build_dir,
-        "assets"
-    )
-
-    os.makedirs(
-        assets_dir,
-        exist_ok=True
-    )
+def validate_logo_extension(filename: str) -> str:
+    """
+    Validate the logo's file extension up front, synchronously,
+    so bad uploads are rejected immediately instead of surfacing
+    as a failure of a background job the client has to poll for.
+    """
 
     extension = Path(
-        logo.filename or ""
+        filename or ""
     ).suffix.lower()
 
     allowed_extensions = {
@@ -6084,12 +6075,37 @@ async def save_logo(
             )
         )
 
+    return extension
+
+
+def save_logo_bytes(
+    content: bytes,
+    extension: str,
+    build_dir: str
+):
+    """
+    Write already-read logo bytes to disk. Takes raw bytes rather
+    than an UploadFile because this runs from a background task,
+    after the request (and its UploadFile) has gone away.
+    """
+
+    if content is None:
+        return None
+
+    assets_dir = os.path.join(
+        build_dir,
+        "assets"
+    )
+
+    os.makedirs(
+        assets_dir,
+        exist_ok=True
+    )
+
     logo_path = os.path.join(
         assets_dir,
         "logo" + extension
     )
-
-    content = await logo.read()
 
     with open(
         logo_path,
@@ -6110,105 +6126,83 @@ async def save_logo(
 
 
 # ==========================================================
-# Generate PBIVIZ
+# PBIVIZ build jobs
+# ==========================================================
+#
+# npm install + pbiviz package routinely runs longer than Azure
+# App Service's fixed ~230s front-end request timeout, so it can't
+# run inline inside the request without risking a 502 Bad Gateway
+# there (even though the same code returns fine on Render/locally).
+# The endpoint instead kicks the build off as a background task and
+# hands back a job id right away; the client polls
+# /generate-pbiviz/{job_id}/status and fetches the file from
+# /generate-pbiviz/{job_id}/download once it's done.
+#
+# Jobs live in memory only, so they don't survive a process restart
+# or scale-out to multiple instances - acceptable for the current
+# single-instance deployment.
 # ==========================================================
 
-@app.post("/generate-pbiviz")
-async def generate_pbiviz(
-    config: str = Form(...),
-    logo: Optional[UploadFile] = File(None)
+PBIVIZ_JOBS: Dict[str, dict] = {}
+_pbiviz_jobs_lock = threading.Lock()
+
+
+def _set_job(job_id: str, **fields):
+
+    with _pbiviz_jobs_lock:
+        PBIVIZ_JOBS[job_id].update(fields)
+
+
+def run_pbiviz_build(
+    job_id: str,
+    cfg: dict,
+    logo_bytes: Optional[bytes],
+    logo_extension: Optional[str]
 ):
 
     build_root = None
-    response_path = None
+
+    _set_job(job_id, status="running")
 
     try:
-
-        # ==================================================
-        # 1. Parse configuration
-        # ==================================================
-
-        try:
-
-            cfg = json.loads(
-                config
-            )
-
-        except json.JSONDecodeError:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid branding configuration JSON."
-                )
-            )
-
 
         company_name = cfg.get(
             "company_name",
             "custom"
         )
 
-
-        semantic_model_stage = cfg.get(
-            "semantic_model_stage"
-        )
-
-
-        if not semantic_model_stage:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "semantic_model_stage is required."
-                )
-            )
-
-
         # ==================================================
-        # 2. Create isolated temporary build directory
+        # 1. Create isolated temporary build directory
         # ==================================================
 
         build_root = tempfile.mkdtemp(
             prefix="cortexchat_pbiviz_"
         )
 
-
         print("========================================")
         print("PBIVIZ BUILD STARTED")
         print("========================================")
 
-        print(
-            f"Company: {company_name}"
-        )
-
-        print(
-            f"Build directory: {build_root}"
-        )
-
+        print(f"Job: {job_id}")
+        print(f"Company: {company_name}")
+        print(f"Build directory: {build_root}")
         print(
             f"CortexChat template: "
             f"{CORTEXCHAT_TEMPLATE_DIR}"
         )
 
-
         # ==================================================
-        # 3. Copy bundled CortexChat template
+        # 2. Copy bundled CortexChat template
         # ==================================================
 
         repository_dir = create_cortexchat_build(
             build_root
         )
 
-
-        print(
-            "STEP 1 COMPLETE: "
-            "CortexChat template copied"
-        )
-
+        print("STEP 1 COMPLETE: CortexChat template copied")
 
         # ==================================================
-        # 4. Inject branding configuration
+        # 3. Inject branding configuration
         # ==================================================
 
         write_branding_config(
@@ -6216,61 +6210,46 @@ async def generate_pbiviz(
             cfg
         )
 
-
-        print(
-            "STEP 2 COMPLETE: "
-            "Branding configuration applied"
-        )
-
+        print("STEP 2 COMPLETE: Branding configuration applied")
 
         # ==================================================
-        # 5. Save logo and update branding config
+        # 4. Save logo and update branding config
         # ==================================================
 
-        if logo:
+        if logo_bytes:
 
-            logo_path = await save_logo(
-                logo,
+            logo_path = save_logo_bytes(
+                logo_bytes,
+                logo_extension,
                 repository_dir
             )
 
             if logo_path and os.path.exists(logo_path):
 
-                with open(
-                    logo_path,
-                    "rb"
-                ) as image_file:
+                with open(logo_path, "rb") as image_file:
 
                     encoded = base64.b64encode(
                         image_file.read()
                     ).decode("ascii")
 
-                    extension = (
-                        Path(logo_path).suffix.lower().lstrip(".")
-                    )
+                mime_type = "image/png"
 
-                    mime_type = "image/png"
+                if logo_extension in {".jpg", ".jpeg"}:
+                    mime_type = "image/jpeg"
 
-                    if extension in {"jpg", "jpeg"}:
-                        mime_type = "image/jpeg"
-
-                    cfg["logoDataUri"] = (
-                        f"data:{mime_type};base64,{encoded}"
-                    )
+                cfg["logoDataUri"] = (
+                    f"data:{mime_type};base64,{encoded}"
+                )
 
                 write_branding_config(
                     repository_dir,
                     cfg
                 )
 
-        print(
-            "STEP 2A COMPLETE: "
-            "Logo processing completed"
-        )
-
+        print("STEP 2A COMPLETE: Logo processing completed")
 
         # ==================================================
-        # 6. Install npm dependencies
+        # 5. Install npm dependencies
         # ==================================================
 
         ensure_node_installed()
@@ -6285,7 +6264,6 @@ async def generate_pbiviz(
             f"{build_env.get('PATH', '')}"
         )
         build_env["NODE_ENV"] = "development"
-        
 
         print("STEP 3: Starting npm install")
 
@@ -6299,23 +6277,12 @@ async def generate_pbiviz(
             env=build_env,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=600
         )
 
-        print(
-            "npm return code:",
-            npm_install.returncode
-        )
-
-        print(
-            "npm stdout:",
-            npm_install.stdout
-        )
-
-        print(
-            "npm stderr:",
-            npm_install.stderr
-        )
+        print("npm return code:", npm_install.returncode)
+        print("npm stdout:", npm_install.stdout)
+        print("npm stderr:", npm_install.stderr)
 
         if npm_install.returncode != 0:
 
@@ -6324,14 +6291,10 @@ async def generate_pbiviz(
                 + npm_install.stderr
             )
 
-        print(
-            "STEP 3 COMPLETE: "
-            "npm install successful"
-        )
-
+        print("STEP 3 COMPLETE: npm install successful")
 
         # ==================================================
-        # 7. Build PBIVIZ
+        # 6. Build PBIVIZ
         # ==================================================
 
         pbiviz_bin = os.path.join(
@@ -6350,20 +6313,9 @@ async def generate_pbiviz(
             timeout=300
         )
 
-        print(
-            "pbiviz return code:",
-            pbiviz_build.returncode
-        )
-
-        print(
-            "pbiviz stdout:",
-            pbiviz_build.stdout
-        )
-
-        print(
-            "pbiviz stderr:",
-            pbiviz_build.stderr
-        )
+        print("pbiviz return code:", pbiviz_build.returncode)
+        print("pbiviz stdout:", pbiviz_build.stdout)
+        print("pbiviz stderr:", pbiviz_build.stderr)
 
         if pbiviz_build.returncode != 0:
 
@@ -6372,14 +6324,10 @@ async def generate_pbiviz(
                 + pbiviz_build.stderr
             )
 
-        print(
-            "STEP 4 COMPLETE: "
-            "PBIVIZ generated"
-        )
-
+        print("STEP 4 COMPLETE: PBIVIZ generated")
 
         # ==================================================
-        # 8. Locate generated PBIVIZ
+        # 7. Locate generated PBIVIZ
         # ==================================================
 
         dist_dir = os.path.join(
@@ -6387,30 +6335,18 @@ async def generate_pbiviz(
             "dist"
         )
 
-
-        if not os.path.exists(
-            dist_dir
-        ):
+        if not os.path.exists(dist_dir):
 
             raise RuntimeError(
                 "PBIVIZ build completed but dist "
                 "directory was not found."
             )
 
-
         pbiviz_files = [
-
             filename
-
-            for filename
-            in os.listdir(dist_dir)
-
-            if filename.endswith(
-                ".pbiviz"
-            )
-
+            for filename in os.listdir(dist_dir)
+            if filename.endswith(".pbiviz")
         ]
-
 
         if not pbiviz_files:
 
@@ -6419,18 +6355,13 @@ async def generate_pbiviz(
                 ".pbiviz file was found."
             )
 
-
         source_pbiviz = os.path.join(
-
             dist_dir,
-
             pbiviz_files[0]
-
         )
 
-
         # ==================================================
-        # 9. Create customer-friendly filename
+        # 8. Create customer-friendly filename
         # ==================================================
 
         company_slug = re.sub(
@@ -6439,42 +6370,23 @@ async def generate_pbiviz(
             company_name
         ).strip("_")
 
-
         if not company_slug:
-
             company_slug = "custom"
-
 
         final_filename = (
             f"CortexChat_{company_slug}.pbiviz"
         )
 
-
-        print(
-            "PBIVIZ successfully generated:"
-        )
-
-        print(
-            source_pbiviz
-        )
-
+        print("PBIVIZ successfully generated:")
+        print(source_pbiviz)
 
         print("========================================")
         print("PBIVIZ BUILD SUCCESSFUL")
         print("========================================")
 
-
-                # ==================================================
-        # 10. Save generated PBIVIZ
         # ==================================================
-
-        # Local Windows testing
-        # downloads_dir = os.path.join(
-        #     os.path.expanduser("~"),
-        #     "Downloads",
-        #     "CortexPBIViz"
-        # )
-        # os.makedirs(downloads_dir, exist_ok=True)
+        # 9. Save generated PBIVIZ
+        # ==================================================
 
         # Azure-safe path
         downloads_dir = os.path.join(
@@ -6483,9 +6395,11 @@ async def generate_pbiviz(
         )
         os.makedirs(downloads_dir, exist_ok=True)
 
+        # Namespaced by job id so concurrent builds (e.g. the same
+        # company name) can't overwrite each other's output file.
         response_path = os.path.join(
             downloads_dir,
-            final_filename
+            f"{job_id}_{final_filename}"
         )
 
         shutil.copy2(
@@ -6493,67 +6407,29 @@ async def generate_pbiviz(
             response_path
         )
 
-        print(
-            "PBIVIZ saved to output folder: "
-            f"{response_path}"
+        print(f"PBIVIZ saved to output folder: {response_path}")
+
+        _set_job(
+            job_id,
+            status="done",
+            result_path=response_path,
+            filename=final_filename
         )
-
-        # ==================================================
-        # 11. Return PBIVIZ
-        # ==================================================
-
-        return FileResponse(
-
-            path=response_path,
-
-            filename=final_filename,
-
-            media_type=(
-                "application/octet-stream"
-            )
-
-        )
-
-
-    except HTTPException:
-
-        raise
-
 
     except Exception as build_error:
 
         print("========================================")
         print("PBIVIZ BUILD FAILED")
         print("========================================")
-
-        print(
-            f"Error type: "
-            f"{type(build_error).__name__}"
-        )
-
-        print(
-            f"Error: "
-            f"{str(build_error)}"
-        )
-
+        print(f"Error type: {type(build_error).__name__}")
+        print(f"Error: {str(build_error)}")
         print("========================================")
 
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail={
-                "message":
-                    "Failed to generate PBIVIZ.",
-
-                "error":
-                    str(build_error)
-
-            }
-
+        _set_job(
+            job_id,
+            status="failed",
+            error=str(build_error)
         )
-
 
     finally:
 
@@ -6582,6 +6458,119 @@ async def generate_pbiviz(
                     f"{cleanup_error}"
                 )
 
-        # The generated PBIVIZ remains in the Downloads
-        # directory used by the response.
-        pass
+        # The generated PBIVIZ remains in the /tmp/CortexPBIViz
+        # directory used by the download endpoint.
+
+
+# ==========================================================
+# Generate PBIVIZ
+# ==========================================================
+
+@app.post("/generate-pbiviz", status_code=202)
+async def generate_pbiviz(
+    background_tasks: BackgroundTasks,
+    config: str = Form(...),
+    logo: Optional[UploadFile] = File(None)
+):
+
+    try:
+
+        cfg = json.loads(
+            config
+        )
+
+    except json.JSONDecodeError:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid branding configuration JSON."
+            )
+        )
+
+    if not cfg.get("semantic_model_stage"):
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "semantic_model_stage is required."
+            )
+        )
+
+    logo_bytes = None
+    logo_extension = None
+
+    if logo:
+
+        # Validated synchronously so a bad upload is rejected
+        # immediately, instead of surfacing later as a failed
+        # background job the client has to poll for.
+        logo_extension = validate_logo_extension(logo.filename)
+        logo_bytes = await logo.read()
+
+    job_id = str(uuid.uuid4())
+
+    with _pbiviz_jobs_lock:
+        PBIVIZ_JOBS[job_id] = {"status": "pending"}
+
+    background_tasks.add_task(
+        run_pbiviz_build,
+        job_id,
+        cfg,
+        logo_bytes,
+        logo_extension
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "pending"
+    }
+
+
+@app.get("/generate-pbiviz/{job_id}/status")
+async def get_pbiviz_status(job_id: str):
+
+    with _pbiviz_jobs_lock:
+        job = PBIVIZ_JOBS.get(job_id)
+
+    if job is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown job id."
+        )
+
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "error": job.get("error")
+    }
+
+
+@app.get("/generate-pbiviz/{job_id}/download")
+async def download_pbiviz(job_id: str):
+
+    with _pbiviz_jobs_lock:
+        job = PBIVIZ_JOBS.get(job_id)
+
+    if job is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown job id."
+        )
+
+    if job["status"] != "done":
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Build not finished (status: {job['status']})."
+            )
+        )
+
+    return FileResponse(
+        path=job["result_path"],
+        filename=job["filename"],
+        media_type="application/octet-stream"
+    )
