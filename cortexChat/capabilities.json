@@ -1,0 +1,63 @@
+{
+  "dataRoles": [
+    {
+      "displayName": "Context Fields / Categories",
+      "name": "category",
+      "kind": "Grouping"
+    },
+    {
+      "displayName": "User Email",
+      "name": "userEmail",
+      "kind": "Measure"
+    },
+    {
+      "displayName": "User Region",
+      "name": "userRegion",
+      "kind": "Measure"
+    }
+  ],
+  "dataViewMappings": [
+    {
+      "categorical": {
+        "categories": {
+          "for": {
+            "in": "category"
+          }
+        },
+        "values": {
+          "select": [
+            {
+              "for": {
+                "in": "userEmail"
+              }
+            },
+            {
+              "for": {
+                "in": "userRegion"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "privileges": [
+    {
+      "name": "WebAccess",
+      "essential": true,
+      "parameters": [
+        "https://cortexbackend.onrender.com",
+        "https://cortex-backend-poc-ccd5g2e4evbxgafp.canadacentral-01.azurewebsites.net",
+        "http://localhost:8000"
+      ]
+    },
+    {
+        "name": "ExportContent",
+        "essential": true
+    },
+    {
+      "name": "AADAuthentication",
+      "essential": false
+    }
+  ]
+}

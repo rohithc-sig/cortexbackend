@@ -2,6 +2,7 @@ import os
 import re
 import json
 import uuid
+import base64
 import datetime
 import requests
 import snowflake.connector
@@ -5638,158 +5639,186 @@ def temporary_usage(usage_id: str):
 # PBIVIZ BUILD ENGINE
 # ==========================================================
 
-PBIVIZ_REPOSITORY_URL = os.getenv(
-    "CORTEXCHAT_REPOSITORY_URL"
+# ==========================================================
+# PBIVIZ BUILD ENGINE
+# ==========================================================
+
+# CortexChat is bundled directly with the backend.
+#
+# Expected structure:
+#
+# backend/
+# ├── main.py
+# └── cortexChat/
+#     ├── package.json
+#     ├── package-lock.json
+#     ├── pbiviz.json
+#     ├── src/
+#     ├── assets/
+#     └── ...
+#
+# No GitHub clone is required at runtime.
+
+BASE_DIR = Path(__file__).resolve().parent
+
+CORTEXCHAT_TEMPLATE_DIR = (
+    BASE_DIR / "cortexChat"
 )
 
-GITHUB_TOKEN = os.getenv(
-    "GITHUB_TOKEN"
-)
 
+# ==========================================================
+# Validate CortexChat template
+# ==========================================================
 
-# def clone_cortexchat_repository(
-#     target_dir: str
-# ):
-#     """
-#     Clone the private CortexChat repository into a
-#     temporary build directory.
-#     """
+def validate_cortexchat_template():
+    """
+    Verify that the bundled CortexChat PBIVIZ project
+    exists and contains the expected files.
+    """
 
-#     if not PBIVIZ_REPOSITORY_URL:
-#         raise RuntimeError(
-#             "CORTEXCHAT_REPOSITORY_URL is not configured."
-#         )
+    if not CORTEXCHAT_TEMPLATE_DIR.exists():
 
-#     if not GITHUB_TOKEN:
-#         raise RuntimeError(
-#             "GITHUB_TOKEN is not configured."
-#         )
-
-#     repository_url = PBIVIZ_REPOSITORY_URL
-
-#     # ------------------------------------------------------
-#     # Inject GitHub token into HTTPS clone URL
-#     # ------------------------------------------------------
-
-#     if repository_url.startswith(
-#         "https://github.com/"
-#     ):
-
-#         clone_url = repository_url.replace(
-#             "https://github.com/",
-#             f"https://x-access-token:{GITHUB_TOKEN}@github.com/"
-#         )
-
-#     else:
-
-#         clone_url = repository_url
-
-#     # ------------------------------------------------------
-#     # Clone
-#     # ------------------------------------------------------
-
-#     result = subprocess.run(
-#         [
-#             "git",
-#             "clone",
-#             "--depth",
-#             "1",
-#             clone_url,
-#             target_dir
-#         ],
-#         capture_output=True,
-#         text=True,
-#         timeout=120
-#     )
-
-#     if result.returncode != 0:
-
-#         # Never expose token in error response
-#         error_text = result.stderr.replace(
-#             GITHUB_TOKEN,
-#             "***"
-#         )
-
-#         raise RuntimeError(
-#             "Failed to clone CortexChat repository: "
-#             + error_text
-#         )
-
-#     return target_dir
-
-def clone_cortexchat_repository(target_dir: str):
-
-    print("STEP 1: Starting git clone")
-
-    if not PBIVIZ_REPOSITORY_URL:
         raise RuntimeError(
-            "CORTEXCHAT_REPOSITORY_URL is not configured."
+            "CortexChat template directory was not found: "
+            f"{CORTEXCHAT_TEMPLATE_DIR}"
         )
 
-    if not GITHUB_TOKEN:
+    if not CORTEXCHAT_TEMPLATE_DIR.is_dir():
+
         raise RuntimeError(
-            "GITHUB_TOKEN is not configured."
+            "CortexChat template path is not a directory: "
+            f"{CORTEXCHAT_TEMPLATE_DIR}"
         )
 
-    repository_url = PBIVIZ_REPOSITORY_URL
-
-    if repository_url.startswith("https://github.com/"):
-
-        clone_url = repository_url.replace(
-            "https://github.com/",
-            f"https://x-access-token:{GITHUB_TOKEN}@github.com/"
-        )
-
-    else:
-        clone_url = repository_url
-
-    print("Repository URL configured:", repository_url)
-    print("Target directory:", target_dir)
-    print("Checking git executable...")
-
-    git_check = subprocess.run(
-        ["git", "--version"],
-        capture_output=True,
-        text=True
+    package_json = (
+        CORTEXCHAT_TEMPLATE_DIR / "package.json"
     )
 
-    print("Git check:", git_check.stdout)
-
-    print("Running git clone...")
-
-    result = subprocess.run(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            clone_url,
-            target_dir
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120
+    pbiviz_json = (
+        CORTEXCHAT_TEMPLATE_DIR / "pbiviz.json"
     )
 
-    print("Git return code:", result.returncode)
-    print("Git stdout:", result.stdout)
-    print("Git stderr:", result.stderr)
-
-    if result.returncode != 0:
-
-        error_text = result.stderr.replace(
-            GITHUB_TOKEN,
-            "***"
-        )
+    if not package_json.exists():
 
         raise RuntimeError(
-            "Failed to clone CortexChat repository: "
-            + error_text
+            "CortexChat template is missing package.json: "
+            f"{package_json}"
         )
 
-    print("STEP 1 COMPLETE: Repository cloned")
+    if not pbiviz_json.exists():
 
-    return target_dir
+        raise RuntimeError(
+            "CortexChat template is missing pbiviz.json: "
+            f"{pbiviz_json}"
+        )
+
+    return True
+
+
+# ==========================================================
+# Create isolated CortexChat build directory
+# ==========================================================
+
+def create_cortexchat_build(build_root: str):
+
+    """
+    Copy the bundled CortexChat template into an isolated
+    temporary build directory.
+
+    The original cortexChat folder is NEVER modified.
+    """
+
+    validate_cortexchat_template()
+
+    repository_dir = os.path.join(
+        build_root,
+        "cortexChat"
+    )
+
+    print(
+        "Copying CortexChat template:"
+    )
+
+    print(
+        f"Source: {CORTEXCHAT_TEMPLATE_DIR}"
+    )
+
+    print(
+        f"Target: {repository_dir}"
+    )
+
+    shutil.copytree(
+        CORTEXCHAT_TEMPLATE_DIR,
+        repository_dir
+    )
+
+    print(
+        "CortexChat template copied successfully."
+    )
+
+    return repository_dir
+
+
+# ==========================================================
+# Branding configuration
+# ==========================================================
+
+def resolve_node_executable(command_name: str) -> str:
+    """
+    Return a concrete executable path for Node tooling on Windows.
+
+    Python subprocess on Windows does not always resolve shell shims
+    like npm.cmd / npx.cmd correctly from PATH, so we resolve them
+    explicitly before invoking the command.
+    """
+
+    candidates = [
+        command_name,
+        f"{command_name}.cmd",
+        f"{command_name}.exe",
+        f"{command_name}.ps1"
+    ]
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    return command_name
+
+
+def create_pwsh_shim(build_dir: str) -> str:
+    """
+    Create a pwsh shim in the temp build directory so the PBIVIZ
+    certificate helper can find a PowerShell executable on Windows.
+    """
+
+    powershell_exe = shutil.which("powershell.exe")
+
+    if not powershell_exe:
+        return ""
+
+    shim_dir = build_dir
+    shim_path = os.path.join(
+        shim_dir,
+        "pwsh.cmd"
+    )
+
+    shim_content = (
+        "@echo off\r\n"
+        f'"{powershell_exe}" %*\r\n'
+    )
+
+    with open(
+        shim_path,
+        "w",
+        encoding="utf-8",
+        newline=""
+    ) as f:
+        f.write(shim_content)
+
+    return shim_dir
+
 
 def write_branding_config(
     build_dir: str,
@@ -5821,6 +5850,16 @@ def write_branding_config(
         "Cortex AI Assistant"
     )
 
+    assistant_name = config.get(
+        "assistant_name",
+        "Cortex"
+    )
+
+    welcome_message = config.get(
+        "welcome_message",
+        "How can I help you today?"
+    )
+
     primary_color = config.get(
         "primary_color",
         "#29B5E8"
@@ -5836,13 +5875,21 @@ def write_branding_config(
         ""
     )
 
+    logo_data_uri = config.get(
+        "logoDataUri",
+        ""
+    )
+
     branding_source = f"""
 export const BRANDING = {{
     companyName: {json.dumps(company_name)},
     headerText: {json.dumps(header_text)},
+    assistantName: {json.dumps(assistant_name)},
+    welcomeMessage: {json.dumps(welcome_message)},
     primaryColor: {json.dumps(primary_color)},
     secondaryColor: {json.dumps(secondary_color)},
-    semanticModelStage: {json.dumps(semantic_model_stage)}
+    semanticModelStage: {json.dumps(semantic_model_stage)},
+    logoDataUri: {json.dumps(logo_data_uri)}
 }};
 """
 
@@ -5856,7 +5903,20 @@ export const BRANDING = {{
             branding_source
         )
 
+    print(
+        "Branding configuration written:"
+    )
+
+    print(
+        config_path
+    )
+
     return config_path
+
+
+# ==========================================================
+# Save uploaded logo
+# ==========================================================
 
 async def save_logo(
     logo: UploadFile,
@@ -5909,7 +5969,20 @@ async def save_logo(
 
         f.write(content)
 
+    print(
+        "Logo saved:"
+    )
+
+    print(
+        logo_path
+    )
+
     return logo_path
+
+
+# ==========================================================
+# Generate PBIVIZ
+# ==========================================================
 
 @app.post("/generate-pbiviz")
 async def generate_pbiviz(
@@ -5936,7 +6009,9 @@ async def generate_pbiviz(
 
             raise HTTPException(
                 status_code=400,
-                detail="Invalid branding configuration JSON."
+                detail=(
+                    "Invalid branding configuration JSON."
+                )
             )
 
 
@@ -5969,11 +6044,6 @@ async def generate_pbiviz(
             prefix="cortexchat_pbiviz_"
         )
 
-        repository_dir = os.path.join(
-            build_root,
-            "cortexChat"
-        )
-
 
         print("========================================")
         print("PBIVIZ BUILD STARTED")
@@ -5987,13 +6057,24 @@ async def generate_pbiviz(
             f"Build directory: {build_root}"
         )
 
+        print(
+            f"CortexChat template: "
+            f"{CORTEXCHAT_TEMPLATE_DIR}"
+        )
+
 
         # ==================================================
-        # 3. Clone private CortexChat repo
+        # 3. Copy bundled CortexChat template
         # ==================================================
 
-        clone_cortexchat_repository(
-            repository_dir
+        repository_dir = create_cortexchat_build(
+            build_root
+        )
+
+
+        print(
+            "STEP 1 COMPLETE: "
+            "CortexChat template copied"
         )
 
 
@@ -6007,70 +6088,163 @@ async def generate_pbiviz(
         )
 
 
+        print(
+            "STEP 2 COMPLETE: "
+            "Branding configuration applied"
+        )
+
+
         # ==================================================
-        # 5. Save logo
+        # 5. Save logo and update branding config
         # ==================================================
 
         if logo:
 
-            await save_logo(
+            logo_path = await save_logo(
                 logo,
                 repository_dir
             )
 
+            if logo_path and os.path.exists(logo_path):
+
+                with open(
+                    logo_path,
+                    "rb"
+                ) as image_file:
+
+                    encoded = base64.b64encode(
+                        image_file.read()
+                    ).decode("ascii")
+
+                    extension = (
+                        Path(logo_path).suffix.lower().lstrip(".")
+                    )
+
+                    mime_type = "image/png"
+
+                    if extension in {"jpg", "jpeg"}:
+                        mime_type = "image/jpeg"
+
+                    cfg["logoDataUri"] = (
+                        f"data:{mime_type};base64,{encoded}"
+                    )
+
+                write_branding_config(
+                    repository_dir,
+                    cfg
+                )
+
+        print(
+            "STEP 2A COMPLETE: "
+            "Logo processing completed"
+        )
+
 
         # ==================================================
-        # 6. Install dependencies
+        # 6. Install npm dependencies
         # ==================================================
 
-        print("STEP 3: Starting npm install")
+        npm_cmd = resolve_node_executable("npm")
+        create_pwsh_shim(repository_dir)
+
+        build_env = os.environ.copy()
+        build_env["PATH"] = (
+            f"{repository_dir}{os.pathsep}{build_env.get('PATH', '')}"
+        )
+
+        print(
+            "STEP 3: Starting npm install"
+        )
 
         npm_install = subprocess.run(
-            ["npm.cmd", "install"],
+            [
+                npm_cmd,
+                "install"
+            ],
             cwd=repository_dir,
+            env=build_env,
             capture_output=True,
             text=True,
             timeout=300
         )
 
-        print("npm return code:", npm_install.returncode)
-        print("npm stdout:", npm_install.stdout)
-        print("npm stderr:", npm_install.stderr)
+        print(
+            "npm return code:",
+            npm_install.returncode
+        )
+
+        print(
+            "npm stdout:",
+            npm_install.stdout
+        )
+
+        print(
+            "npm stderr:",
+            npm_install.stderr
+        )
 
         if npm_install.returncode != 0:
+
             raise RuntimeError(
                 "npm install failed:\n"
                 + npm_install.stderr
             )
 
-        print("STEP 3 COMPLETE: npm install successful")
+        print(
+            "STEP 3 COMPLETE: "
+            "npm install successful"
+        )
 
 
         # ==================================================
         # 7. Build PBIVIZ
         # ==================================================
 
-        print("STEP 4: Starting pbiviz package")
+        npx_cmd = resolve_node_executable("npx")
+
+        print(
+            "STEP 4: Starting pbiviz package"
+        )
 
         pbiviz_build = subprocess.run(
-            ["npx.cmd", "pbiviz", "package"],
+            [
+                npx_cmd,
+                "pbiviz",
+                "package"
+            ],
             cwd=repository_dir,
+            env=build_env,
             capture_output=True,
             text=True,
             timeout=300
         )
 
-        print("pbiviz return code:", pbiviz_build.returncode)
-        print("pbiviz stdout:", pbiviz_build.stdout)
-        print("pbiviz stderr:", pbiviz_build.stderr)
+        print(
+            "pbiviz return code:",
+            pbiviz_build.returncode
+        )
+
+        print(
+            "pbiviz stdout:",
+            pbiviz_build.stdout
+        )
+
+        print(
+            "pbiviz stderr:",
+            pbiviz_build.stderr
+        )
 
         if pbiviz_build.returncode != 0:
+
             raise RuntimeError(
                 "pbiviz package failed:\n"
                 + pbiviz_build.stderr
             )
 
-        print("STEP 4 COMPLETE: PBIVIZ generated")
+        print(
+            "STEP 4 COMPLETE: "
+            "PBIVIZ generated"
+        )
 
 
         # ==================================================
@@ -6088,8 +6262,8 @@ async def generate_pbiviz(
         ):
 
             raise RuntimeError(
-                "PBIVIZ build completed but dist directory "
-                "was not found."
+                "PBIVIZ build completed but dist "
+                "directory was not found."
             )
 
 
@@ -6110,8 +6284,8 @@ async def generate_pbiviz(
         if not pbiviz_files:
 
             raise RuntimeError(
-                "PBIVIZ build completed but no .pbiviz "
-                "file was found."
+                "PBIVIZ build completed but no "
+                ".pbiviz file was found."
             )
 
 
@@ -6158,21 +6332,25 @@ async def generate_pbiviz(
         print("PBIVIZ BUILD SUCCESSFUL")
         print("========================================")
 
-        # ==================================================
-        # 10. Save the generated PBIVIZ in a user-visible
-        #     folder so it is easy to find on disk.
+
+                # ==================================================
+        # 10. Save generated PBIVIZ
         # ==================================================
 
+        # Local Windows testing
+        # downloads_dir = os.path.join(
+        #     os.path.expanduser("~"),
+        #     "Downloads",
+        #     "CortexPBIViz"
+        # )
+        # os.makedirs(downloads_dir, exist_ok=True)
+
+        # Azure-safe path
         downloads_dir = os.path.join(
-            os.path.expanduser("~"),
-            "Downloads",
+            "/tmp",
             "CortexPBIViz"
         )
-
-        os.makedirs(
-            downloads_dir,
-            exist_ok=True
-        )
+        os.makedirs(downloads_dir, exist_ok=True)
 
         response_path = os.path.join(
             downloads_dir,
@@ -6185,9 +6363,13 @@ async def generate_pbiviz(
         )
 
         print(
-            "PBIVIZ saved to Downloads: "
+            "PBIVIZ saved to output folder: "
             f"{response_path}"
         )
+
+        # ==================================================
+        # 11. Return PBIVIZ
+        # ==================================================
 
         return FileResponse(
 
@@ -6195,7 +6377,9 @@ async def generate_pbiviz(
 
             filename=final_filename,
 
-            media_type="application/octet-stream"
+            media_type=(
+                "application/octet-stream"
+            )
 
         )
 
@@ -6267,6 +6451,6 @@ async def generate_pbiviz(
                     f"{cleanup_error}"
                 )
 
-        # The generated PBIVIZ is intentionally kept in the Downloads
-        # folder so it remains accessible to the user.
+        # The generated PBIVIZ remains in the Downloads
+        # directory used by the response.
         pass

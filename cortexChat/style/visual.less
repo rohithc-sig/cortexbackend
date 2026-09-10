@@ -1,0 +1,51 @@
+#cortex-chat-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    font-family: "Segoe UI", sans-serif;
+    background: white;
+    border: 1px solid #d9d9d9;
+    border-radius: 8px;
+}
+
+.chat-header {
+    background: #0078d4;
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 12px;
+}
+
+.chat-body {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+    font-size: 14px;
+}
+
+.chat-footer {
+    display: flex;
+    gap: 10px;
+    padding: 12px;
+    border-top: 1px solid #d9d9d9;
+}
+
+.chat-footer input {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 14px;
+}
+
+.chat-footer button {
+    padding: 8px 18px;
+    background: #0078d4;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.chat-footer button:hover {
+    background: #106ebe;
+}
