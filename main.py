@@ -150,11 +150,13 @@ def get_active_semantic_view():
         "SNOWFLAKE_SEMANTIC_VIEW"
     )
 
-    force_env_semantic_view = os.getenv(
-        "FORCE_ENV_SEMANTIC_VIEW",
-        ""
-    ).strip().lower() in ("1", "true", "yes")
+    # force_env_semantic_view = os.getenv(
+    #     "FORCE_ENV_SEMANTIC_VIEW",
+    #     ""
+    # ).strip().lower() in ("1", "true", "yes")
 
+    force_env_semantic_view = "true"
+    
     if force_env_semantic_view:
         return fallback
 
@@ -6138,19 +6140,58 @@ def save_logo_bytes(
 # /generate-pbiviz/{job_id}/status and fetches the file from
 # /generate-pbiviz/{job_id}/download once it's done.
 #
-# Jobs live in memory only, so they don't survive a process restart
-# or scale-out to multiple instances - acceptable for the current
-# single-instance deployment.
+# Jobs are persisted to disk (one JSON file per job) rather than
+# kept in memory. Azure App Service's Startup Command runs multiple
+# gunicorn worker *processes*, each with its own memory - a status
+# poll can easily land on a different worker than the one that
+# started the build, so an in-memory dict isn't visible across them.
+# BASE_DIR lives under /home on Azure, which is the one part of the
+# filesystem shared across all workers of an instance (and across
+# scaled-out instances too), so writing job state there instead
+# makes it visible regardless of which worker handles a request.
 # ==========================================================
 
-PBIVIZ_JOBS: Dict[str, dict] = {}
+PBIVIZ_JOBS_DIR = BASE_DIR / ".pbiviz_jobs"
 _pbiviz_jobs_lock = threading.Lock()
+
+
+def _job_path(job_id: str):
+    return PBIVIZ_JOBS_DIR / f"{job_id}.json"
+
+
+def _read_job(job_id: str) -> Optional[dict]:
+
+    try:
+        with open(_job_path(job_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _write_job(job_id: str, data: dict):
+    """
+    Write a job's state atomically (write to a temp file, then
+    os.replace) so a concurrent reader on another worker never sees
+    a partially written file.
+    """
+
+    with _pbiviz_jobs_lock:
+
+        PBIVIZ_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = _job_path(job_id).with_suffix(".json.tmp")
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        os.replace(tmp_path, _job_path(job_id))
 
 
 def _set_job(job_id: str, **fields):
 
-    with _pbiviz_jobs_lock:
-        PBIVIZ_JOBS[job_id].update(fields)
+    job = _read_job(job_id) or {}
+    job.update(fields)
+    _write_job(job_id, job)
 
 
 def run_pbiviz_build(
@@ -6510,8 +6551,7 @@ async def generate_pbiviz(
 
     job_id = str(uuid.uuid4())
 
-    with _pbiviz_jobs_lock:
-        PBIVIZ_JOBS[job_id] = {"status": "pending"}
+    _write_job(job_id, {"status": "pending"})
 
     background_tasks.add_task(
         run_pbiviz_build,
@@ -6530,8 +6570,7 @@ async def generate_pbiviz(
 @app.get("/generate-pbiviz/{job_id}/status")
 async def get_pbiviz_status(job_id: str):
 
-    with _pbiviz_jobs_lock:
-        job = PBIVIZ_JOBS.get(job_id)
+    job = _read_job(job_id)
 
     if job is None:
 
@@ -6550,8 +6589,7 @@ async def get_pbiviz_status(job_id: str):
 @app.get("/generate-pbiviz/{job_id}/download")
 async def download_pbiviz(job_id: str):
 
-    with _pbiviz_jobs_lock:
-        job = PBIVIZ_JOBS.get(job_id)
+    job = _read_job(job_id)
 
     if job is None:
 
