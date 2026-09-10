@@ -6151,15 +6151,15 @@ async def generate_pbiviz(
         build_env["PATH"] = (
             f"{repository_dir}{os.pathsep}{build_env.get('PATH', '')}"
         )
+        build_env["NODE_ENV"] = "development"
 
-        print(
-            "STEP 3: Starting npm install"
-        )
+        print("STEP 3: Starting npm install")
 
         npm_install = subprocess.run(
             [
                 npm_cmd,
-                "install"
+                "install",
+                "--include=dev"
             ],
             cwd=repository_dir,
             env=build_env,
@@ -6200,18 +6200,15 @@ async def generate_pbiviz(
         # 7. Build PBIVIZ
         # ==================================================
 
-        npx_cmd = resolve_node_executable("npx")
-
-        print(
-            "STEP 4: Starting pbiviz package"
+        pbiviz_bin = os.path.join(
+            repository_dir, "node_modules", ".bin",
+            "pbiviz.cmd" if os.name == "nt" else "pbiviz"
         )
 
+        print("STEP 4: Starting pbiviz package")
+
         pbiviz_build = subprocess.run(
-            [
-                npx_cmd,
-                "pbiviz",
-                "package"
-            ],
+            [pbiviz_bin, "package"],
             cwd=repository_dir,
             env=build_env,
             capture_output=True,
