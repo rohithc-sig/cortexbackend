@@ -114,6 +114,86 @@ def get_connection():
     )
 
 
+# ----------------------------------------------------------
+# Active Semantic View Lookup
+# ----------------------------------------------------------
+#
+# The Streamlit semantic-view generator writes the fully
+# qualified name of the semantic view it just created into
+# this shared config table (see set_active_semantic_view in
+# cortexFrontendStreamlit/semantic_generator.py). Reading it
+# here means CortexChat picks up a newly generated semantic
+# view immediately, without editing SNOWFLAKE_SEMANTIC_VIEW
+# and restarting this service.
+#
+# SNOWFLAKE_SEMANTIC_VIEW is kept as a fallback for as long
+# as no semantic view has been generated through the
+# Streamlit app yet, or if the config table is unreachable.
+#
+# Set FORCE_ENV_SEMANTIC_VIEW=true in .env to intentionally
+# ignore APP_CONFIG and always use SNOWFLAKE_SEMANTIC_VIEW,
+# e.g. to pin CortexChat to a known-good view regardless of
+# whatever was most recently generated in Streamlit.
+#
+# ----------------------------------------------------------
+
+ACTIVE_SEMANTIC_VIEW_CONFIG_TABLE = "CPG.IBP_SEMANTIC.APP_CONFIG"
+
+ACTIVE_SEMANTIC_VIEW_CONFIG_KEY = "ACTIVE_SEMANTIC_VIEW"
+
+
+def get_active_semantic_view():
+
+    fallback = os.getenv(
+        "SNOWFLAKE_SEMANTIC_VIEW"
+    )
+
+    force_env_semantic_view = os.getenv(
+        "FORCE_ENV_SEMANTIC_VIEW",
+        ""
+    ).strip().lower() in ("1", "true", "yes")
+
+    if force_env_semantic_view:
+        return fallback
+
+    conn = None
+
+    try:
+
+        conn = get_connection()
+
+        cursor = conn.cursor()
+
+        cursor.execute(
+            f"""
+            SELECT CONFIG_VALUE
+            FROM {ACTIVE_SEMANTIC_VIEW_CONFIG_TABLE}
+            WHERE CONFIG_KEY = %s
+            """,
+            (ACTIVE_SEMANTIC_VIEW_CONFIG_KEY,),
+        )
+
+        row = cursor.fetchone()
+
+        if row and row[0]:
+            return row[0]
+
+    except Exception as e:
+
+        print(
+            "Unable to read active semantic view from "
+            f"{ACTIVE_SEMANTIC_VIEW_CONFIG_TABLE}, falling back to "
+            f"SNOWFLAKE_SEMANTIC_VIEW env var: {e}"
+        )
+
+    finally:
+
+        if conn is not None:
+            conn.close()
+
+    return fallback
+
+
 # ==========================================================
 # SQL SAFETY / EXECUTION SETTINGS
 # ==========================================================
@@ -4284,11 +4364,7 @@ def chat(request: ChatRequest):
     # NATIVE SNOWFLAKE SEMANTIC VIEW
     # ======================================================
 
-    semantic_view = os.getenv(
-
-        "SNOWFLAKE_SEMANTIC_VIEW"
-
-    )
+    semantic_view = get_active_semantic_view()
 
 
     if not semantic_view:
@@ -5111,6 +5187,9 @@ def chat(request: ChatRequest):
 
         "sql":
             generated_sql,
+# details of semantic view i queried
+        "semantic_view":
+            semantic_view,
 
         "columns":
             columns,
