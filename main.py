@@ -6,6 +6,7 @@ import base64
 import datetime
 import requests
 import snowflake.connector
+import tarfile
 
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
@@ -5760,6 +5761,55 @@ def create_cortexchat_build(build_root: str):
 
 
 # ==========================================================
+# Bundled Node.js runtime (Azure App Service has no Node)
+# ==========================================================
+
+NODE_VERSION = "20.11.1"
+NODE_RUNTIME_DIR = BASE_DIR / ".node-runtime"
+NODE_BIN_DIR = (
+    NODE_RUNTIME_DIR / f"node-v{NODE_VERSION}-linux-x64" / "bin"
+)
+
+
+def ensure_node_installed():
+    """
+    Download a private, self-contained copy of Node.js (which bundles
+    npm and npx) into the app's own directory if it isn't already
+    there. This lets PBIVIZ builds work on hosts (like Azure App
+    Service's Python stack) that don't have Node installed at all,
+    without needing any portal/infra-level configuration change.
+    """
+
+    node_bin = NODE_BIN_DIR / "node"
+
+    if node_bin.exists():
+        return
+
+    NODE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    url = (
+        f"https://nodejs.org/dist/v{NODE_VERSION}/"
+        f"node-v{NODE_VERSION}-linux-x64.tar.xz"
+    )
+
+    print(f"Node.js not found — downloading from {url}")
+
+    tar_path = NODE_RUNTIME_DIR / "node.tar.xz"
+
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(tar_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+
+    with tarfile.open(tar_path) as tf:
+        tf.extractall(NODE_RUNTIME_DIR)
+
+    tar_path.unlink()
+
+    print("Node.js installed at", NODE_BIN_DIR)
+
+# ==========================================================
 # Branding configuration
 # ==========================================================
 
@@ -6144,14 +6194,19 @@ async def generate_pbiviz(
         # 6. Install npm dependencies
         # ==================================================
 
+        ensure_node_installed()
+
         npm_cmd = resolve_node_executable("npm")
         create_pwsh_shim(repository_dir)
 
         build_env = os.environ.copy()
         build_env["PATH"] = (
-            f"{repository_dir}{os.pathsep}{build_env.get('PATH', '')}"
+            f"{NODE_BIN_DIR}{os.pathsep}"
+            f"{repository_dir}{os.pathsep}"
+            f"{build_env.get('PATH', '')}"
         )
         build_env["NODE_ENV"] = "development"
+        
 
         print("STEP 3: Starting npm install")
 
