@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 snowflake-connector-python
 python-dotenv
 requests
