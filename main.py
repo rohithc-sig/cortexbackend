@@ -6306,33 +6306,38 @@ def run_pbiviz_build(
         )
         build_env["NODE_ENV"] = "development"
 
-        print("STEP 3: Starting npm install")
+        pbiviz_bin = os.path.join(repository_dir, "node_modules", ".bin", "pbiviz")
 
-        npm_install = subprocess.run(
-            [
-                npm_cmd,
-                "install",
-                "--include=dev"
-            ],
-            cwd=repository_dir,
-            env=build_env,
-            capture_output=True,
-            text=True,
-            timeout=600
-        )
+        if not os.path.exists(pbiviz_bin):
+            print("STEP 3: Starting npm install")
 
-        print("npm return code:", npm_install.returncode)
-        print("npm stdout:", npm_install.stdout)
-        print("npm stderr:", npm_install.stderr)
-
-        if npm_install.returncode != 0:
-
-            raise RuntimeError(
-                "npm install failed:\n"
-                + npm_install.stderr
+            npm_install = subprocess.run(
+                [
+                    npm_cmd,
+                    "install",
+                    "--include=dev"
+                ],
+                cwd=repository_dir,
+                env=build_env,
+                capture_output=True,
+                text=True,
+                timeout=600
             )
 
-        print("STEP 3 COMPLETE: npm install successful")
+            print("npm return code:", npm_install.returncode)
+            print("npm stdout:", npm_install.stdout)
+            print("npm stderr:", npm_install.stderr)
+
+            if npm_install.returncode != 0:
+
+                raise RuntimeError(
+                    "npm install failed:\n"
+                    + npm_install.stderr
+                )
+
+            print("STEP 3 COMPLETE: npm install successful")
+        else:
+            print("STEP 3: pbiviz binary already present in node_modules, skipping npm install!")
 
         # ==================================================
         # 6. Build PBIVIZ
