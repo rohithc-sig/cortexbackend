@@ -11,10 +11,16 @@
       "kind": "Measure"
     },
     {
-      "displayName": "User Region",
-      "name": "userRegion",
+      "displayName": "RLS Column Name",
+      "name": "rlsColumn",
+      "kind": "Measure"
+    },
+    {
+      "displayName": "RLS Filter Value",
+      "name": "rlsValue",
       "kind": "Measure"
     }
+
   ],
   "dataViewMappings": [
     {
@@ -33,7 +39,12 @@
             },
             {
               "for": {
-                "in": "userRegion"
+                "in": "rlsValue"
+              }
+            },
+            {
+              "for": {
+                "in": "rlsColumn"
               }
             }
           ]

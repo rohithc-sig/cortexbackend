@@ -9,7 +9,9 @@ export class App {
     private host: VisualHost;
     private pbiContext: any = { categories: [] };
     private userEmail?: string;
-    private userRegion?: string;
+    private rlsColumn?: string;
+    private rlsValue?: string;
+
 
     private userIdentity: {
         status: "available" | "unavailable";
@@ -53,9 +55,11 @@ export class App {
         this.userEmail = userEmail;
     }
 
-    public setUserRegion(userRegion?: string) {
-        this.userRegion = userRegion;
+    public setRlsFilter(rlsColumn?: string, rlsValue?: string) {
+        this.rlsColumn = rlsColumn;
+        this.rlsValue = rlsValue;
     }
+
 
     // ============================================================
     // BRANDING HELPERS
@@ -1985,8 +1989,12 @@ export class App {
             user_email:
                 this.userEmail,
 
-            user_region:
-                this.userRegion,
+            rls_column:
+                this.rlsColumn,
+
+            rls_values:
+                this.rlsValue !== undefined ? [this.rlsValue] : undefined,
+
 
             user_identity:
                 this.userIdentity

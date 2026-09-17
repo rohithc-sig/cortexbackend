@@ -52,16 +52,25 @@ export class Visual implements IVisual {
                 : String(userEmailValue)
         );
 
-        const userRegionValue =
+        const rlsColumnValue =
             dataView?.categorical?.values?.find(
                 valueColumn =>
-                    valueColumn.source.roles?.userRegion
+                    valueColumn.source.roles?.rlsColumn
             )?.values?.[0];
 
-        this.app.setUserRegion(
-            userRegionValue === null || userRegionValue === undefined
+        const rlsValue =
+            dataView?.categorical?.values?.find(
+                valueColumn =>
+                    valueColumn.source.roles?.rlsValue
+            )?.values?.[0];
+
+        this.app.setRlsFilter(
+            rlsColumnValue === null || rlsColumnValue === undefined
                 ? undefined
-                : String(userRegionValue)
+                : String(rlsColumnValue),
+            rlsValue === null || rlsValue === undefined
+                ? undefined
+                : String(rlsValue)
         );
         if (
             dataView &&
